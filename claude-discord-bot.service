@@ -1,0 +1,16 @@
+[Unit]
+Description=Discord bot: pick a repo, launch claude --remote-control
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/git/claude-open
+ExecStart=/home/pi/git/claude-open/.venv/bin/python /home/pi/git/claude-open/bot.py
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=/home/pi/git/claude-open/.env
+
+[Install]
+WantedBy=multi-user.target
