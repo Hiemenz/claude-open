@@ -46,13 +46,19 @@ CLAUDE_BIN = shutil.which("claude") or "claude"
 TMUX_BIN = shutil.which("tmux") or "tmux"
 
 LIST_COMMANDS = {"!repos", "!repo", "!ls", "!claude"}
+STATUS_COMMANDS = {"!status", "!sessions", "!ps"}
+KILL_COMMANDS = {"!kill", "!stop"}
 
 # Discord hard-caps message content at 2000 characters.
 DISCORD_MESSAGE_LIMIT = 2000
 
-# Discord message content per-channel: repo list from the most recent !repos,
-# so a bare number reply knows what it refers to.
+# Per-channel: repo list from the most recent !repos, so a bare number reply
+# knows what it refers to.
 pending_listings: dict[int, list[Path]] = {}
+
+# Per-channel: session-name list from the most recent !status, so
+# `!kill <number>` knows what it refers to.
+pending_sessions: dict[int, list[str]] = {}
 
 
 def list_repos() -> list[Path]:
@@ -62,9 +68,9 @@ def list_repos() -> list[Path]:
     return sorted(repos, key=lambda p: p.name.lower())
 
 
-def format_repo_listing(repos: list[Path]) -> list[str]:
-    """Render numbered repo names as one or more Discord-sized code blocks."""
-    lines = [f"{i}: {repo.name}" for i, repo in enumerate(repos)]
+def format_numbered_listing(names: list[str], footer: str) -> list[str]:
+    """Render numbered names as one or more Discord-sized code blocks."""
+    lines = [f"{i}: {name}" for i, name in enumerate(names)]
 
     chunks = []
     current: list[str] = []
@@ -80,8 +86,18 @@ def format_repo_listing(repos: list[Path]) -> list[str]:
     if current:
         chunks.append("```\n" + "\n".join(current) + "\n```")
 
-    chunks[-1] += "\nReply with a number."
+    chunks[-1] += f"\n{footer}"
     return chunks
+
+
+def format_repo_listing(repos: list[Path]) -> list[str]:
+    return format_numbered_listing([repo.name for repo in repos], "Reply with a number.")
+
+
+def format_session_listing(sessions: list[str]) -> list[str]:
+    return format_numbered_listing(
+        sessions, "Reply with `!kill <number>` to stop one, or `!kill <name>`."
+    )
 
 
 def sanitize_session_name(name: str) -> str:
@@ -95,6 +111,26 @@ def tmux_session_exists(session_name: str) -> bool:
         capture_output=True,
     )
     return result.returncode == 0
+
+
+def list_active_sessions() -> list[str]:
+    """List running tmux session names (empty if none, or no tmux server)."""
+    result = subprocess.run(
+        [TMUX_BIN, "list-sessions", "-F", "#{session_name}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return []
+    return [line for line in result.stdout.splitlines() if line]
+
+
+def kill_session(session_name: str) -> str:
+    if not tmux_session_exists(session_name):
+        return f"No running session named **{session_name}**."
+
+    subprocess.run([TMUX_BIN, "kill-session", "-t", session_name], check=True)
+    return f"Stopped session **{session_name}**."
 
 
 def launch_remote_control(repo_path: Path) -> str:
@@ -157,6 +193,47 @@ async def on_message(message: discord.Message):
 
         for chunk in format_repo_listing(repos):
             await message.channel.send(chunk)
+        return
+
+    if content.lower() in STATUS_COMMANDS:
+        sessions = list_active_sessions()
+        pending_sessions[message.channel.id] = sessions
+
+        if not sessions:
+            await message.channel.send("No sessions running.")
+            return
+
+        for chunk in format_session_listing(sessions):
+            await message.channel.send(chunk)
+        return
+
+    command, _, rest = content.partition(" ")
+    if command.lower() in KILL_COMMANDS:
+        arg = rest.strip()
+        if not arg:
+            await message.channel.send(
+                "Usage: `!kill <number>` (from `!status`) or `!kill <name>`."
+            )
+            return
+
+        if arg.isdigit():
+            sessions = pending_sessions.get(message.channel.id)
+            if not sessions:
+                await message.channel.send("No status list yet — send `!status` first.")
+                return
+            idx = int(arg)
+            if not (0 <= idx < len(sessions)):
+                await message.channel.send(f"Pick a number between 0 and {len(sessions) - 1}.")
+                return
+            session_name = sessions[idx]
+        else:
+            session_name = sanitize_session_name(arg)
+
+        try:
+            reply = kill_session(session_name)
+        except subprocess.CalledProcessError as exc:
+            reply = f"Failed to stop session: {exc}"
+        await message.channel.send(reply)
         return
 
     if content.isdigit():

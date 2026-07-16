@@ -60,6 +60,17 @@ def test_format_repo_listing_splits_when_over_discord_limit(monkeypatch):
     assert chunks[-1].endswith("Reply with a number.")
 
 
+# ---- format_session_listing --------------------------------------------
+
+def test_format_session_listing_has_kill_footer():
+    chunks = bot.format_session_listing(["repo-a", "repo-b"])
+
+    assert len(chunks) == 1
+    assert "0: repo-a" in chunks[0]
+    assert "1: repo-b" in chunks[0]
+    assert chunks[0].endswith("Reply with `!kill <number>` to stop one, or `!kill <name>`.")
+
+
 # ---- sanitize_session_name ---------------------------------------------
 
 @pytest.mark.parametrize(
@@ -130,6 +141,52 @@ def test_launch_remote_control_propagates_subprocess_error(tmp_path):
             bot.launch_remote_control(repo)
 
 
+# ---- list_active_sessions ------------------------------------------------
+
+def test_list_active_sessions_parses_tmux_output():
+    with patch("bot.subprocess.run") as run:
+        run.return_value = SimpleNamespace(returncode=0, stdout="alpha\nbeta\n")
+        assert bot.list_active_sessions() == ["alpha", "beta"]
+
+
+def test_list_active_sessions_empty_when_no_server():
+    with patch("bot.subprocess.run") as run:
+        run.return_value = SimpleNamespace(returncode=1, stdout="")
+        assert bot.list_active_sessions() == []
+
+
+# ---- kill_session ----------------------------------------------------------
+
+def test_kill_session_reports_missing_session():
+    with patch("bot.tmux_session_exists", return_value=False), \
+         patch("bot.subprocess.run") as run:
+        reply = bot.kill_session("ghost")
+
+    run.assert_not_called()
+    assert "No running session named" in reply
+    assert "ghost" in reply
+
+
+def test_kill_session_kills_running_session():
+    with patch("bot.tmux_session_exists", return_value=True), \
+         patch("bot.subprocess.run") as run:
+        reply = bot.kill_session("my-repo")
+
+    run.assert_called_once()
+    args = run.call_args.args[0]
+    assert args[0] == bot.TMUX_BIN
+    assert "kill-session" in args
+    assert "my-repo" in args
+    assert "Stopped session" in reply
+
+
+def test_kill_session_propagates_subprocess_error():
+    with patch("bot.tmux_session_exists", return_value=True), \
+         patch("bot.subprocess.run", side_effect=subprocess.CalledProcessError(1, "tmux")):
+        with pytest.raises(subprocess.CalledProcessError):
+            bot.kill_session("my-repo")
+
+
 # ---- on_message integration ---------------------------------------------
 
 def make_message(content, author_id=None, channel_id=None, is_bot=False):
@@ -146,8 +203,10 @@ def make_message(content, author_id=None, channel_id=None, is_bot=False):
 @pytest.fixture(autouse=True)
 def clear_pending_listings():
     bot.pending_listings.clear()
+    bot.pending_sessions.clear()
     yield
     bot.pending_listings.clear()
+    bot.pending_sessions.clear()
 
 
 async def test_on_message_ignores_other_users():
@@ -232,3 +291,87 @@ async def test_on_message_number_reports_subprocess_failure():
 
     sent = message.channel.send.await_args.args[0]
     assert "Failed to start session" in sent
+
+
+# ---- on_message: !status / !kill -----------------------------------------
+
+async def test_on_message_status_with_none_running(monkeypatch):
+    monkeypatch.setattr(bot, "list_active_sessions", lambda: [])
+    message = make_message("!status")
+
+    await bot.on_message(message)
+
+    message.channel.send.assert_awaited_once_with("No sessions running.")
+
+
+async def test_on_message_status_lists_and_remembers_for_channel(monkeypatch):
+    sessions = ["alpha", "beta"]
+    monkeypatch.setattr(bot, "list_active_sessions", lambda: sessions)
+    message = make_message("!sessions")
+
+    await bot.on_message(message)
+
+    assert bot.pending_sessions[bot.ALLOWED_CHANNEL_ID] == sessions
+    sent = message.channel.send.await_args.args[0]
+    assert "0: alpha" in sent and "1: beta" in sent
+
+
+async def test_on_message_kill_without_arg_shows_usage():
+    message = make_message("!kill")
+
+    await bot.on_message(message)
+
+    sent = message.channel.send.await_args.args[0]
+    assert "Usage:" in sent
+
+
+async def test_on_message_kill_number_without_prior_status():
+    message = make_message("!kill 0")
+
+    await bot.on_message(message)
+
+    message.channel.send.assert_awaited_once_with(
+        "No status list yet — send `!status` first."
+    )
+
+
+async def test_on_message_kill_number_out_of_range():
+    bot.pending_sessions[bot.ALLOWED_CHANNEL_ID] = ["only-one"]
+    message = make_message("!kill 5")
+
+    await bot.on_message(message)
+
+    sent = message.channel.send.await_args.args[0]
+    assert "Pick a number between 0 and 0" in sent
+
+
+async def test_on_message_kill_by_number_uses_session_from_status(monkeypatch):
+    bot.pending_sessions[bot.ALLOWED_CHANNEL_ID] = ["picked-session"]
+    message = make_message("!kill 0")
+
+    with patch("bot.kill_session", return_value="Stopped!") as kill:
+        await bot.on_message(message)
+
+    kill.assert_called_once_with("picked-session")
+    message.channel.send.assert_awaited_once_with("Stopped!")
+
+
+async def test_on_message_kill_by_name_sanitizes_and_kills(monkeypatch):
+    message = make_message("!stop my repo!")
+
+    with patch("bot.kill_session", return_value="Stopped!") as kill:
+        await bot.on_message(message)
+
+    kill.assert_called_once_with("my-repo-")
+    message.channel.send.assert_awaited_once_with("Stopped!")
+
+
+async def test_on_message_kill_reports_subprocess_failure():
+    message = make_message("!kill some-repo")
+
+    error = subprocess.CalledProcessError(1, "tmux")
+    with patch("bot.kill_session", side_effect=error):
+        await bot.on_message(message)
+
+    sent = message.channel.send.await_args.args[0]
+    assert "Failed to stop session" in sent

@@ -59,6 +59,9 @@ Logs: `journalctl -u claude-discord-bot -f`
 - Reply with the number — starts (or resumes, if already running)
   `claude --remote-control <repo-name>` in that repo's directory, as a
   detached tmux session named after the repo.
+- `!status` (also `!sessions`, `!ps`) — list currently running tmux sessions.
+- `!kill <number>` (from the last `!status`) or `!kill <name>` (also `!stop`)
+  — stop a running session.
 
 ## Debugging a session directly on the Pi
 
@@ -103,9 +106,6 @@ Not blocking for personal use, but worth knowing about:
 
 - **Single hardcoded user/channel.** By design (see Notes above), but means
   sharing this with anyone else means editing `.env`, not adding a role.
-- **No session management commands.** You can start/resume a session, but
-  there's no `!kill <repo>` or `!status` to list/stop running tmux sessions
-  from Discord — you have to SSH in and use `tmux kill-session`.
 - **No repo search/filter.** `!repos` always lists everything one level
   under `GIT_ROOT`; fine for a handful of repos, less so for dozens.
 - **No logging beyond `print`.** Systemd captures it via journald, but
