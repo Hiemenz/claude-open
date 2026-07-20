@@ -15,11 +15,13 @@ Flow:
 Only responds to one Discord user in one Discord channel (see .env).
 """
 
+import asyncio
 import os
 import re
 import shutil
 import socket
 import subprocess
+import time
 from pathlib import Path
 
 import discord
@@ -150,14 +152,29 @@ def kill_session(session_name: str) -> str:
     return f"Stopped session **{session_name}**."
 
 
+def _session_has_live_claude(session_name: str) -> bool:
+    """Return True if a claude process is still running inside the tmux session."""
+    pane = subprocess.run(
+        [TMUX_BIN, "list-panes", "-t", session_name, "-F", "#{pane_pid}"],
+        capture_output=True,
+        text=True,
+    )
+    if pane.returncode != 0 or not pane.stdout.strip():
+        return False
+    pane_pid = pane.stdout.strip().split()[0]
+    check = subprocess.run(
+        ["pgrep", "-P", pane_pid],
+        capture_output=True,
+    )
+    return check.returncode == 0
+
+
 AUTH_URL_RE = re.compile(r"https?://\S*(auth|login|oauth|authorize)\S*", re.IGNORECASE)
 SESSION_URL_RE = re.compile(r"https://claude\.ai/code/session_\S+")
 
 
-def _extract_session_url(session_name: str, timeout: float = 15.0) -> str | None:
+async def _extract_session_url(session_name: str, timeout: float = 15.0) -> str | None:
     """Poll tmux pane until the remote-control URL appears, then return it."""
-    import time
-
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = subprocess.run(
@@ -168,14 +185,12 @@ def _extract_session_url(session_name: str, timeout: float = 15.0) -> str | None
         match = SESSION_URL_RE.search(result.stdout)
         if match:
             return match.group(0)
-        time.sleep(0.5)
+        await asyncio.sleep(0.5)
     return None
 
 
-def _extract_auth_prompt(session_name: str, timeout: float = 5.0) -> str | None:
+async def _extract_auth_prompt(session_name: str, timeout: float = 5.0) -> str | None:
     """Check tmux pane for an authorization URL or prompt from Claude."""
-    import time
-
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = subprocess.run(
@@ -189,16 +204,16 @@ def _extract_auth_prompt(session_name: str, timeout: float = 5.0) -> str | None:
             return auth_match.group(0)
         for keyword in ("authorize", "log in", "sign in", "authentication required"):
             if keyword in text.lower():
-                line = next(
-                    (l.strip() for l in text.splitlines() if keyword in l.lower()), None
+                ln = next(
+                    (ln.strip() for ln in text.splitlines() if keyword in ln.lower()), None
                 )
-                if line:
-                    return line
-        time.sleep(0.5)
+                if ln:
+                    return ln
+        await asyncio.sleep(0.5)
     return None
 
 
-def launch_remote_control(
+async def launch_remote_control(
     repo_path: Path,
     channel_name: str = "",
     guild_name: str = "",
@@ -211,13 +226,22 @@ def launch_remote_control(
     device_tag = f"on **{DEVICE_NAME}**"
 
     if tmux_session_exists(session_name):
-        url = _extract_session_url(session_name, timeout=3.0)
-        suffix = f"\n{url}" if url else " — pick it up in the Claude app / claude.ai/code."
-        return (
-            f"Session **{session_name}** is already running in `{repo_path}` "
-            f"({source}, {device_tag}){suffix}",
-            None,
-        )
+        url = await _extract_session_url(session_name, timeout=3.0)
+        if url:
+            return (
+                f"Session **{session_name}** is already running in `{repo_path}` "
+                f"({source}, {device_tag})\n{url}",
+                None,
+            )
+        # Session exists but no URL — check if claude is still alive.
+        if _session_has_live_claude(session_name):
+            return (
+                f"Session **{session_name}** is running ({source}, {device_tag}) "
+                "— pick it up in the Claude app / claude.ai/code.",
+                None,
+            )
+        # Dead session: kill it and fall through to restart.
+        subprocess.run([TMUX_BIN, "kill-session", "-t", session_name], capture_output=True)
 
     subprocess.run(
         [
@@ -233,12 +257,12 @@ def launch_remote_control(
         check=True,
     )
 
-    url = _extract_session_url(session_name)
+    url = await _extract_session_url(session_name)
     if url:
         suffix = f"\n{url}"
         auth = None
     else:
-        auth = _extract_auth_prompt(session_name)
+        auth = await _extract_auth_prompt(session_name)
         suffix = " — pick it up in the Claude app / claude.ai/code."
 
     return (
@@ -295,21 +319,21 @@ def pi_stats() -> str:
     return "```\n" + "\n".join(lines) + "\n```"
 
 
-def create_and_launch(
+async def create_and_launch(
     name: str, channel_name: str = "", guild_name: str = ""
 ) -> tuple[str, str | None]:
     safe = sanitize_session_name(name)
     dest = GIT_ROOT / safe
 
     if dest.exists():
-        return launch_remote_control(dest, channel_name, guild_name)
+        return await launch_remote_control(dest, channel_name, guild_name)
 
     dest.mkdir(parents=True)
     subprocess.run([GIT_BIN, "init", str(dest)], capture_output=True, check=True)
-    return launch_remote_control(dest, channel_name, guild_name)
+    return await launch_remote_control(dest, channel_name, guild_name)
 
 
-def clone_and_launch(
+async def clone_and_launch(
     github_url: str, channel_name: str = "", guild_name: str = ""
 ) -> tuple[str, str | None]:
     m = GITHUB_URL_RE.match(github_url)
@@ -320,9 +344,10 @@ def clone_and_launch(
     dest = GIT_ROOT / repo_name
 
     if dest.exists():
-        return launch_remote_control(dest, channel_name, guild_name)
+        return await launch_remote_control(dest, channel_name, guild_name)
 
-    result = subprocess.run(
+    result = await asyncio.to_thread(
+        subprocess.run,
         [GIT_BIN, "clone", github_url, str(dest)],
         capture_output=True,
         text=True,
@@ -330,7 +355,7 @@ def clone_and_launch(
     if result.returncode != 0:
         return (f"Clone failed:\n```\n{result.stderr.strip()}\n```", None)
 
-    return launch_remote_control(dest, channel_name, guild_name)
+    return await launch_remote_control(dest, channel_name, guild_name)
 
 
 intents = discord.Intents.default()
@@ -371,7 +396,7 @@ async def on_message(message: discord.Message):
         return
 
     if content.lower() in STATS_COMMANDS:
-        await message.channel.send(pi_stats())
+        await message.channel.send(await asyncio.to_thread(pi_stats))
         return
 
     if content.lower() in LIST_COMMANDS:
@@ -436,7 +461,7 @@ async def on_message(message: discord.Message):
             await message.channel.send("Usage: `!new <project-name>`")
             return
         try:
-            reply, auth = create_and_launch(name, ch_name, guild_name)
+            reply, auth = await create_and_launch(name, ch_name, guild_name)
         except subprocess.CalledProcessError as exc:
             reply, auth = f"Failed to create project: {exc}", None
         await message.channel.send(reply)
@@ -447,7 +472,7 @@ async def on_message(message: discord.Message):
     if GITHUB_URL_RE.match(content):
         await message.channel.send("Cloning…")
         try:
-            reply, auth = clone_and_launch(content, ch_name, guild_name)
+            reply, auth = await clone_and_launch(content, ch_name, guild_name)
         except subprocess.CalledProcessError as exc:
             reply, auth = f"Failed to start session: {exc}", None
         await message.channel.send(reply)
@@ -468,7 +493,7 @@ async def on_message(message: discord.Message):
 
         repo_path = repos[idx]
         try:
-            reply, auth = launch_remote_control(repo_path, ch_name, guild_name)
+            reply, auth = await launch_remote_control(repo_path, ch_name, guild_name)
         except subprocess.CalledProcessError as exc:
             reply, auth = f"Failed to start session: {exc}", None
         await message.channel.send(reply)
