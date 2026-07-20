@@ -55,13 +55,21 @@ Logs: `journalctl -u claude-discord-bot -f`
 
 ## Usage
 
-- `!repos` (also `!repo`, `!ls`, `!claude`) — list repos under `GIT_ROOT`.
-- Reply with the number — starts (or resumes, if already running)
-  `claude --remote-control <repo-name>` in that repo's directory, as a
-  detached tmux session named after the repo.
-- `!status` (also `!sessions`, `!ps`) — list currently running tmux sessions.
-- `!kill <number>` (from the last `!status`) or `!kill <name>` (also `!stop`)
-  — stop a running session.
+Send `!help` in the channel to get the full command list. Quick reference:
+
+| Command | What it does |
+|---|---|
+| `!repos` | List git repos under `GIT_ROOT` |
+| `<number>` | Launch a session for that repo (from last `!repos`) |
+| `<github url>` | Clone the repo to `~/git/` and launch a session |
+| `!new <name>` | Create a new repo at `~/git/<name>` and launch a session |
+| `!status` | List running sessions |
+| `!kill <number\|name>` | Stop a session |
+| `!stats` | Show Pi CPU / RAM / disk / temp / uptime |
+| `!help` | Show command list |
+
+When a session starts, the bot replies with the direct `claude.ai/code/session_…`
+URL — tap it from Discord to open the session on your phone.
 
 ## Debugging a session directly on the Pi
 
@@ -111,8 +119,4 @@ Not blocking for personal use, but worth knowing about:
 - **No logging beyond `print`.** Systemd captures it via journald, but
   there's no log level control or structured logging if this ever needs to
   be debugged remotely.
-- **Not yet a git repo itself.** There's a `.gitignore` but no `.git` —
-  worth `git init`-ing so changes to the bot are tracked like everything
-  else it manages.
-- **No CI.** Tests exist now, but nothing runs them automatically on push
-  (relevant once this is in git/GitHub).
+- **No CI.** Tests exist but nothing runs them automatically on push.
