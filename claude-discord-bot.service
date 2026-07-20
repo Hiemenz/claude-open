@@ -7,10 +7,11 @@ Wants=network-online.target
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/git/claude-open
-ExecStart=/home/pi/git/claude-open/.venv/bin/python /home/pi/git/claude-open/bot.py
+ExecStart=/home/pi/git/claude-open/.venv/bin/python -u /home/pi/git/claude-open/bot.py
 Restart=on-failure
 RestartSec=5
 EnvironmentFile=/home/pi/git/claude-open/.env
+Environment=PATH=/home/pi/.local/bin:/usr/bin:/bin
 
 [Install]
 WantedBy=multi-user.target

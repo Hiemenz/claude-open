@@ -44,10 +44,18 @@ GIT_ROOT = Path(os.environ.get("GIT_ROOT", str(Path.home() / "git"))).expanduser
 
 CLAUDE_BIN = shutil.which("claude") or "claude"
 TMUX_BIN = shutil.which("tmux") or "tmux"
+GIT_BIN = shutil.which("git") or "git"
+
+GITHUB_URL_RE = re.compile(
+    r"https?://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+?)(?:\.git)?/?$"
+)
 
 LIST_COMMANDS = {"!repos", "!repo", "!ls", "!claude"}
 STATUS_COMMANDS = {"!status", "!sessions", "!ps"}
 KILL_COMMANDS = {"!kill", "!stop"}
+NEW_COMMANDS = {"!new", "!create", "!init"}
+STATS_COMMANDS = {"!stats", "!stat", "!pi", "!sys"}
+HELP_COMMANDS = {"!help", "!h", "!?"}
 
 # Discord hard-caps message content at 2000 characters.
 DISCORD_MESSAGE_LIMIT = 2000
@@ -133,14 +141,32 @@ def kill_session(session_name: str) -> str:
     return f"Stopped session **{session_name}**."
 
 
+def _extract_session_url(session_name: str, timeout: float = 15.0) -> str | None:
+    """Poll tmux pane until the remote-control URL appears, then return it."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    pattern = re.compile(r"https://claude\.ai/code/session_\S+")
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            [TMUX_BIN, "capture-pane", "-t", session_name, "-p"],
+            capture_output=True,
+            text=True,
+        )
+        match = pattern.search(result.stdout)
+        if match:
+            return match.group(0)
+        time.sleep(0.5)
+    return None
+
+
 def launch_remote_control(repo_path: Path) -> str:
     session_name = sanitize_session_name(repo_path.name)
 
     if tmux_session_exists(session_name):
-        return (
-            f"Session **{session_name}** is already running in `{repo_path}` — "
-            "pick it up in the Claude app / claude.ai/code."
-        )
+        url = _extract_session_url(session_name, timeout=3.0)
+        suffix = f"\n{url}" if url else " — pick it up in the Claude app / claude.ai/code."
+        return f"Session **{session_name}** is already running in `{repo_path}`{suffix}"
 
     subprocess.run(
         [
@@ -156,10 +182,90 @@ def launch_remote_control(repo_path: Path) -> str:
         check=True,
     )
 
-    return (
-        f"Started remote-control session **{session_name}** in `{repo_path}` — "
-        "pick it up in the Claude app / claude.ai/code."
+    url = _extract_session_url(session_name)
+    suffix = f"\n{url}" if url else " — pick it up in the Claude app / claude.ai/code."
+    return f"Started remote-control session **{session_name}** in `{repo_path}`{suffix}"
+
+
+def pi_stats() -> str:
+    lines = []
+
+    # CPU
+    cpu = subprocess.run(
+        ["top", "-bn1"], capture_output=True, text=True
+    ).stdout
+    for line in cpu.splitlines():
+        if "Cpu(s)" in line or "cpu(s)" in line.lower():
+            idle = re.search(r"([\d.]+)\s*id", line)
+            if idle:
+                used = 100.0 - float(idle.group(1))
+                lines.append(f"CPU:   {used:.1f}%")
+            break
+
+    # Memory
+    mem = subprocess.run(["free", "-h"], capture_output=True, text=True).stdout
+    for line in mem.splitlines():
+        if line.startswith("Mem:"):
+            parts = line.split()
+            lines.append(f"RAM:   {parts[2]} / {parts[1]} used")
+            break
+
+    # Disk
+    disk = subprocess.run(["df", "-h", "/"], capture_output=True, text=True).stdout
+    for line in disk.splitlines()[1:]:
+        parts = line.split()
+        lines.append(f"Disk:  {parts[2]} / {parts[1]} used ({parts[4]})")
+        break
+
+    # Temperature
+    temp = subprocess.run(["vcgencmd", "measure_temp"], capture_output=True, text=True)
+    if temp.returncode == 0:
+        lines.append(f"Temp:  {temp.stdout.strip().replace('temp=', '')}")
+
+    # Uptime / load
+    up = subprocess.run(["uptime", "-p"], capture_output=True, text=True)
+    load = subprocess.run(["uptime"], capture_output=True, text=True)
+    if up.returncode == 0:
+        lines.append(f"Up:    {up.stdout.strip()}")
+    m = re.search(r"load average[s]?:\s*([\d.]+)", load.stdout)
+    if m:
+        lines.append(f"Load:  {m.group(1)} (1m avg)")
+
+    return "```\n" + "\n".join(lines) + "\n```"
+
+
+def create_and_launch(name: str) -> str:
+    safe = sanitize_session_name(name)
+    dest = GIT_ROOT / safe
+
+    if dest.exists():
+        return launch_remote_control(dest)
+
+    dest.mkdir(parents=True)
+    subprocess.run([GIT_BIN, "init", str(dest)], capture_output=True, check=True)
+    return launch_remote_control(dest)
+
+
+def clone_and_launch(github_url: str) -> str:
+    m = GITHUB_URL_RE.match(github_url)
+    if not m:
+        return "That doesn't look like a valid GitHub URL."
+
+    repo_name = m.group("repo")
+    dest = GIT_ROOT / repo_name
+
+    if dest.exists():
+        return launch_remote_control(dest)
+
+    result = subprocess.run(
+        [GIT_BIN, "clone", github_url, str(dest)],
+        capture_output=True,
+        text=True,
     )
+    if result.returncode != 0:
+        return f"Clone failed:\n```\n{result.stderr.strip()}\n```"
+
+    return launch_remote_control(dest)
 
 
 intents = discord.Intents.default()
@@ -182,6 +288,26 @@ async def on_message(message: discord.Message):
         return
 
     content = message.content.strip()
+
+    if content.lower() in HELP_COMMANDS:
+        await message.channel.send(
+            "```\n"
+            "!repos              List available git repos\n"
+            "<number>            Launch a session for that repo\n"
+            "<github url>        Clone repo and launch a session\n"
+            "!new <name>         Create a new repo and launch a session\n"
+            "!status             List running sessions\n"
+            "!kill <number>      Kill a session by number (from !status)\n"
+            "!kill <name>        Kill a session by name\n"
+            "!stats              Show Pi CPU / RAM / disk / temp / uptime\n"
+            "!help               Show this message\n"
+            "```"
+        )
+        return
+
+    if content.lower() in STATS_COMMANDS:
+        await message.channel.send(pi_stats())
+        return
 
     if content.lower() in LIST_COMMANDS:
         repos = list_repos()
@@ -233,6 +359,27 @@ async def on_message(message: discord.Message):
             reply = kill_session(session_name)
         except subprocess.CalledProcessError as exc:
             reply = f"Failed to stop session: {exc}"
+        await message.channel.send(reply)
+        return
+
+    if command.lower() in NEW_COMMANDS:
+        name = rest.strip()
+        if not name:
+            await message.channel.send("Usage: `!new <project-name>`")
+            return
+        try:
+            reply = create_and_launch(name)
+        except subprocess.CalledProcessError as exc:
+            reply = f"Failed to create project: {exc}"
+        await message.channel.send(reply)
+        return
+
+    if GITHUB_URL_RE.match(content):
+        await message.channel.send("Cloning…")
+        try:
+            reply = clone_and_launch(content)
+        except subprocess.CalledProcessError as exc:
+            reply = f"Failed to start session: {exc}"
         await message.channel.send(reply)
         return
 
