@@ -172,6 +172,8 @@ def _session_has_live_claude(session_name: str) -> bool:
 AUTH_URL_RE = re.compile(r"https?://\S*(auth|login|oauth|authorize)\S*", re.IGNORECASE)
 SESSION_URL_RE = re.compile(r"https://claude\.ai/code/session_\S+")
 
+TRUST_PROMPT = "Is this a project you created or one you trust"
+
 
 async def _extract_session_url(session_name: str, timeout: float = 15.0) -> str | None:
     """Poll tmux pane until the remote-control URL appears, then return it."""
@@ -182,9 +184,12 @@ async def _extract_session_url(session_name: str, timeout: float = 15.0) -> str 
             capture_output=True,
             text=True,
         )
-        match = SESSION_URL_RE.search(result.stdout)
+        pane = result.stdout
+        match = SESSION_URL_RE.search(pane)
         if match:
             return match.group(0)
+        if TRUST_PROMPT in pane:
+            subprocess.run([TMUX_BIN, "send-keys", "-t", session_name, "Enter"])
         await asyncio.sleep(0.5)
     return None
 
