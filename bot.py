@@ -66,6 +66,18 @@ NEW_COMMANDS = {"!new", "!create", "!init"}
 STATS_COMMANDS = {"!stats", "!stat", "!pi", "!sys"}
 BASH_COMMANDS = {"!bash", "!sh", "!exec"}
 HELP_COMMANDS = {"!help", "!h", "!?"}
+DEVICE_COMMANDS = {"!devices", "!device", "!pis"}
+
+# Hostnames of all Pis sharing this channel (comma-separated in .env).
+# Used to detect when another device is being addressed so this bot stays silent.
+KNOWN_DEVICES = frozenset(
+    d.strip().lower()
+    for d in os.environ.get("KNOWN_DEVICES", DEVICE_NAME).split(",")
+    if d.strip()
+)
+
+# How long a device stays "active" after selection before requiring re-activation.
+ACTIVE_DURATION_SECONDS = float(os.environ.get("ACTIVE_DURATION_SECONDS", str(4 * 3600)))
 
 BASH_TIMEOUT_SECONDS = float(os.environ.get("BASH_TIMEOUT_SECONDS", "60"))
 
@@ -79,6 +91,17 @@ pending_listings: dict[int, list[Path]] = {}
 # Per-channel: session-name list from the most recent !status, so
 # `!kill <number>` knows what it refers to.
 pending_sessions: dict[int, list[str]] = {}
+
+# Per-channel: when this device's active window expires (monotonic seconds).
+active_until: dict[int, float] = {}
+
+
+def is_active(channel_id: int) -> bool:
+    return time.monotonic() < active_until.get(channel_id, 0.0)
+
+
+def activate(channel_id: int) -> None:
+    active_until[channel_id] = time.monotonic() + ACTIVE_DURATION_SECONDS
 
 
 def list_repos() -> list[Path]:
@@ -457,6 +480,7 @@ async def on_ready():
     print(f"Logged in as {client.user} (id={client.user.id})")
     print(f"Watching channel {ALLOWED_CHANNEL_ID} for user {ALLOWED_USER_ID}")
     print(f"GIT_ROOT = {GIT_ROOT}")
+    print(f"Device name: {DEVICE_NAME}  Known devices: {sorted(KNOWN_DEVICES)}")
     print(f"Idle session timeout: {IDLE_TIMEOUT_HOURS:.0f}h")
     if _reaper_task is None or _reaper_task.done():
         _reaper_task = client.loop.create_task(idle_reaper_loop())
@@ -469,10 +493,41 @@ async def on_message(message: discord.Message):
     if message.author.id != ALLOWED_USER_ID or message.channel.id != ALLOWED_CHANNEL_ID:
         return
 
-    content = message.content.strip()
+    raw = message.content.strip()
+    channel_id = message.channel.id
+    raw_lower = raw.lower()
+    first_word = raw_lower.split()[0] if raw_lower.split() else ""
+
+    # Bare device name → activate this Pi and wait for commands.
+    if raw_lower == DEVICE_NAME.lower():
+        activate(channel_id)
+        await message.channel.send(f"Ready — **{DEVICE_NAME}** active. Send `!repos` or `!help`.")
+        return
+
+    # Prefixed command (e.g. "pi2 !repos") → activate and strip prefix.
+    if raw_lower.startswith(DEVICE_NAME.lower() + " "):
+        activate(channel_id)
+        content = raw[len(DEVICE_NAME):].strip()
+
+    # Another known device was addressed → step back silently.
+    elif first_word in KNOWN_DEVICES:
+        active_until.pop(channel_id, None)
+        return
+
+    # Not active and not addressed → only announce on help/devices.
+    elif not is_active(channel_id):
+        if raw_lower in HELP_COMMANDS | DEVICE_COMMANDS:
+            await message.channel.send(
+                f"**{DEVICE_NAME}** available — type `{DEVICE_NAME}` to activate."
+            )
+        return
+
+    else:
+        content = raw
 
     if content.lower() in HELP_COMMANDS:
         await message.channel.send(
+            f"**{DEVICE_NAME}**\n"
             "```\n"
             "!repos              List available git repos\n"
             "<number>            Launch a session for that repo\n"
@@ -484,6 +539,7 @@ async def on_message(message: discord.Message):
             "!stats              Show Pi CPU / RAM / disk / temp / uptime\n"
             "!bash <command>     Run a raw shell command on the Pi\n"
             "!help               Show this message\n"
+            "<device-name>       Switch to a different device\n"
             "```\n"
             f"Sessions idle {IDLE_TIMEOUT_HOURS:.0f}+ hours are auto-killed."
         )
