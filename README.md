@@ -66,10 +66,20 @@ Send `!help` in the channel to get the full command list. Quick reference:
 | `!status` | List running sessions |
 | `!kill <number\|name>` | Stop a session |
 | `!stats` | Show Pi CPU / RAM / disk / temp / uptime |
+| `!bash <command>` | Run a raw shell command on the Pi (aliases: `!sh`, `!exec`) |
 | `!help` | Show command list |
 
 When a session starts, the bot replies with the direct `claude.ai/code/session_…`
 URL — tap it from Discord to open the session on your phone.
+
+## Idle session cleanup
+
+Archiving a session in the Claude app only affects claude.ai — it does not
+touch the tmux session running on the Pi. To avoid sessions piling up, the
+bot checks hourly for tmux sessions with no activity (tmux's own
+`session_activity` timestamp) for `SESSION_IDLE_TIMEOUT_HOURS` (default 72)
+and kills them automatically, posting a note in the Discord channel when it
+does. Set `SESSION_IDLE_TIMEOUT_HOURS` in `.env` to change the threshold.
 
 ## Debugging a session directly on the Pi
 
@@ -83,7 +93,11 @@ tmux attach -t <repo-name> # attach directly (Ctrl-b d to detach again)
 ## Notes
 
 - The bot only ever responds to `ALLOWED_USER_ID` in `ALLOWED_CHANNEL_ID` —
-  everything else is silently ignored.
+  everything else is silently ignored. `!bash` runs with whatever permissions
+  the bot's system user has, so treat `ALLOWED_USER_ID`/`ALLOWED_CHANNEL_ID`
+  as the only thing standing between Discord and a shell on this machine.
+  Commands run with `cwd=GIT_ROOT` and a `BASH_TIMEOUT_SECONDS` (default 60)
+  timeout; output over Discord's 2000-char limit is truncated to the tail.
 - Picking the same repo twice reuses the existing tmux/remote-control
   session instead of starting a duplicate.
 - `.env` holds your bot token — it's gitignored; never commit it.
