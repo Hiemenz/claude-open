@@ -102,26 +102,29 @@ def test_tmux_session_exists_false_when_returncode_nonzero():
 
 # ---- launch_remote_control ----------------------------------------------
 
-def test_launch_remote_control_reuses_existing_session(tmp_path):
+async def test_launch_remote_control_reuses_existing_session(tmp_path):
     repo = tmp_path / "my-repo"
     repo.mkdir()
 
     with patch("bot.tmux_session_exists", return_value=True), \
+         patch("bot._extract_session_url", new=AsyncMock(return_value="https://claude.ai/code/session_abc")), \
          patch("bot.subprocess.run") as run:
-        reply = bot.launch_remote_control(repo)
+        reply, auth = await bot.launch_remote_control(repo)
 
     run.assert_not_called()
     assert "already running" in reply
     assert "my-repo" in reply
+    assert auth is None
 
 
-def test_launch_remote_control_starts_new_tmux_session(tmp_path):
+async def test_launch_remote_control_starts_new_tmux_session(tmp_path):
     repo = tmp_path / "my-repo"
     repo.mkdir()
 
     with patch("bot.tmux_session_exists", return_value=False), \
+         patch("bot._extract_session_url", new=AsyncMock(return_value="https://claude.ai/code/session_xyz")), \
          patch("bot.subprocess.run") as run:
-        reply = bot.launch_remote_control(repo)
+        reply, auth = await bot.launch_remote_control(repo)
 
     run.assert_called_once()
     args = run.call_args.args[0]
@@ -129,16 +132,17 @@ def test_launch_remote_control_starts_new_tmux_session(tmp_path):
     assert "new-session" in args
     assert str(repo) in args
     assert "Started remote-control session" in reply
+    assert auth is None
 
 
-def test_launch_remote_control_propagates_subprocess_error(tmp_path):
+async def test_launch_remote_control_propagates_subprocess_error(tmp_path):
     repo = tmp_path / "my-repo"
     repo.mkdir()
 
     with patch("bot.tmux_session_exists", return_value=False), \
          patch("bot.subprocess.run", side_effect=subprocess.CalledProcessError(1, "tmux")):
         with pytest.raises(subprocess.CalledProcessError):
-            bot.launch_remote_control(repo)
+            await bot.launch_remote_control(repo)
 
 
 # ---- list_active_sessions ------------------------------------------------
@@ -187,6 +191,123 @@ def test_kill_session_propagates_subprocess_error():
             bot.kill_session("my-repo")
 
 
+# ---- list_session_idle_hours / reap_idle_sessions -----------------------
+
+def test_list_session_idle_hours_parses_tmux_output(monkeypatch):
+    monkeypatch.setattr(bot.time, "time", lambda: 1_000_000)
+    with patch("bot.subprocess.run") as run:
+        run.return_value = SimpleNamespace(
+            returncode=0,
+            stdout="alpha 964000\nbeta 999999\n",
+        )
+        idle = bot.list_session_idle_hours()
+
+    assert idle["alpha"] == pytest.approx(10.0)
+    assert idle["beta"] == pytest.approx(1 / 3600)
+
+
+def test_list_session_idle_hours_empty_when_no_server():
+    with patch("bot.subprocess.run") as run:
+        run.return_value = SimpleNamespace(returncode=1, stdout="")
+        assert bot.list_session_idle_hours() == {}
+
+
+def test_reap_idle_sessions_kills_only_sessions_past_threshold():
+    with patch(
+        "bot.list_session_idle_hours",
+        return_value={"stale": 100.0, "fresh": 1.0},
+    ), patch("bot.subprocess.run") as run:
+        killed = bot.reap_idle_sessions(timeout_hours=72)
+
+    assert killed == ["stale"]
+    run.assert_called_once()
+    args = run.call_args.args[0]
+    assert args[0] == bot.TMUX_BIN
+    assert "kill-session" in args
+    assert "stale" in args
+
+
+def test_reap_idle_sessions_kills_nothing_when_all_fresh():
+    with patch(
+        "bot.list_session_idle_hours", return_value={"fresh": 1.0}
+    ), patch("bot.subprocess.run") as run:
+        killed = bot.reap_idle_sessions(timeout_hours=72)
+
+    assert killed == []
+    run.assert_not_called()
+
+
+# ---- run_bash_command -----------------------------------------------------
+
+def test_run_bash_command_returns_stdout():
+    with patch("bot.subprocess.run") as run:
+        run.return_value = SimpleNamespace(returncode=0, stdout="hello\n", stderr="")
+        reply = bot.run_bash_command("echo hello")
+
+    args, kwargs = run.call_args
+    assert args[0] == "echo hello"
+    assert kwargs["shell"] is True
+    assert kwargs["cwd"] == str(bot.GIT_ROOT)
+    assert reply == "```\nhello\n```"
+
+
+def test_run_bash_command_prefixes_nonzero_exit():
+    with patch("bot.subprocess.run") as run:
+        run.return_value = SimpleNamespace(returncode=1, stdout="", stderr="boom")
+        reply = bot.run_bash_command("false")
+
+    assert reply.startswith("[exit 1] ```\nboom")
+
+
+def test_run_bash_command_reports_no_output():
+    with patch("bot.subprocess.run") as run:
+        run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+        reply = bot.run_bash_command("true")
+
+    assert reply == "```\n(no output)\n```"
+
+
+def test_run_bash_command_truncates_long_output():
+    with patch("bot.subprocess.run") as run:
+        run.return_value = SimpleNamespace(returncode=0, stdout="x" * 5000, stderr="")
+        reply = bot.run_bash_command("big")
+
+    assert len(reply) <= bot.DISCORD_MESSAGE_LIMIT
+    assert "…(truncated)…" in reply
+    assert reply.endswith("x" * 10 + "\n```")
+
+
+def test_run_bash_command_handles_timeout():
+    with patch(
+        "bot.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd="sleep 100", timeout=60),
+    ):
+        reply = bot.run_bash_command("sleep 100", timeout=60)
+
+    assert "Timed out after 60s" in reply
+    assert "sleep 100" in reply
+
+
+# ---- on_message: !bash ----------------------------------------------------
+
+async def test_on_message_bash_without_arg_shows_usage():
+    message = make_message("!bash")
+
+    await bot.on_message(message)
+
+    message.channel.send.assert_awaited_once_with("Usage: `!bash <command>`")
+
+
+async def test_on_message_bash_runs_command_and_replies():
+    message = make_message("!bash echo hi")
+
+    with patch("bot.run_bash_command", return_value="```\nhi\n```") as run_bash:
+        await bot.on_message(message)
+
+    run_bash.assert_called_once_with("echo hi")
+    message.channel.send.assert_awaited_once_with("```\nhi\n```")
+
+
 # ---- on_message integration ---------------------------------------------
 
 def make_message(content, author_id=None, channel_id=None, is_bot=False):
@@ -196,6 +317,7 @@ def make_message(content, author_id=None, channel_id=None, is_bot=False):
         content=content,
         author=SimpleNamespace(id=author_id, bot=is_bot),
         channel=SimpleNamespace(id=channel_id, send=AsyncMock()),
+        guild=None,
     )
     return message
 
@@ -273,10 +395,10 @@ async def test_on_message_number_launches_session(tmp_path, monkeypatch):
     bot.pending_listings[bot.ALLOWED_CHANNEL_ID] = [repo]
     message = make_message("0")
 
-    with patch("bot.launch_remote_control", return_value="Started!") as launch:
+    with patch("bot.launch_remote_control", return_value=("Started!", None)) as launch:
         await bot.on_message(message)
 
-    launch.assert_called_once_with(repo)
+    launch.assert_called_once_with(repo, str(bot.ALLOWED_CHANNEL_ID), "")
     message.channel.send.assert_awaited_once_with("Started!")
 
 

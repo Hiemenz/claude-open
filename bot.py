@@ -45,6 +45,10 @@ ALLOWED_USER_ID = int(require_env("ALLOWED_USER_ID"))
 ALLOWED_CHANNEL_ID = int(require_env("ALLOWED_CHANNEL_ID"))
 GIT_ROOT = Path(os.environ.get("GIT_ROOT", str(Path.home() / "git"))).expanduser().resolve()
 
+# Idle tmux sessions (no pane activity for this long) get auto-killed.
+IDLE_TIMEOUT_HOURS = float(os.environ.get("SESSION_IDLE_TIMEOUT_HOURS", "72"))
+IDLE_CHECK_INTERVAL_SECONDS = 60 * 60
+
 DEVICE_NAME = socket.gethostname()
 
 CLAUDE_BIN = shutil.which("claude") or "claude"
@@ -60,7 +64,10 @@ STATUS_COMMANDS = {"!status", "!sessions", "!ps"}
 KILL_COMMANDS = {"!kill", "!stop"}
 NEW_COMMANDS = {"!new", "!create", "!init"}
 STATS_COMMANDS = {"!stats", "!stat", "!pi", "!sys"}
+BASH_COMMANDS = {"!bash", "!sh", "!exec"}
 HELP_COMMANDS = {"!help", "!h", "!?"}
+
+BASH_TIMEOUT_SECONDS = float(os.environ.get("BASH_TIMEOUT_SECONDS", "60"))
 
 # Discord hard-caps message content at 2000 characters.
 DISCORD_MESSAGE_LIMIT = 2000
@@ -150,6 +157,36 @@ def kill_session(session_name: str) -> str:
 
     subprocess.run([TMUX_BIN, "kill-session", "-t", session_name], check=True)
     return f"Stopped session **{session_name}**."
+
+
+def list_session_idle_hours() -> dict[str, float]:
+    """Map session name -> hours since that session last had any activity."""
+    result = subprocess.run(
+        [TMUX_BIN, "list-sessions", "-F", "#{session_name} #{session_activity}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return {}
+
+    now = time.time()
+    idle_hours = {}
+    for line in result.stdout.splitlines():
+        name, _, ts = line.rpartition(" ")
+        if not name or not ts.isdigit():
+            continue
+        idle_hours[name] = (now - int(ts)) / 3600
+    return idle_hours
+
+
+def reap_idle_sessions(timeout_hours: float = IDLE_TIMEOUT_HOURS) -> list[str]:
+    """Kill tmux sessions idle for at least timeout_hours. Returns names killed."""
+    killed = []
+    for name, hours in list_session_idle_hours().items():
+        if hours >= timeout_hours:
+            subprocess.run([TMUX_BIN, "kill-session", "-t", name], capture_output=True)
+            killed.append(name)
+    return killed
 
 
 def _session_has_live_claude(session_name: str) -> bool:
@@ -277,6 +314,29 @@ async def launch_remote_control(
     )
 
 
+def run_bash_command(command: str, timeout: float = BASH_TIMEOUT_SECONDS) -> str:
+    """Run a raw shell command on the Pi (cwd=GIT_ROOT) and format the result for Discord."""
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            cwd=str(GIT_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return f"Timed out after {timeout:.0f}s: `{command}`"
+
+    output = (result.stdout + result.stderr).strip() or "(no output)"
+    prefix = "" if result.returncode == 0 else f"[exit {result.returncode}] "
+    budget = DISCORD_MESSAGE_LIMIT - len(prefix) - len("```\n…(truncated)…\n\n```")
+    if len(output) > budget:
+        output = "…(truncated)…\n" + output[-budget:]
+
+    return f"{prefix}```\n{output}\n```"
+
+
 def pi_stats() -> str:
     lines = [f"Host:  {DEVICE_NAME}"]
 
@@ -367,12 +427,39 @@ intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
+_reaper_task: asyncio.Task | None = None
+
+
+async def idle_reaper_loop():
+    """Periodically kill tmux sessions idle for IDLE_TIMEOUT_HOURS+ and report it."""
+    while not client.is_closed():
+        killed = await asyncio.to_thread(reap_idle_sessions)
+        if killed:
+            channel = client.get_channel(ALLOWED_CHANNEL_ID)
+            if channel:
+                names = ", ".join(f"**{name}**" for name in killed)
+                await channel.send(
+                    f"Cleaned up {len(killed)} session(s) idle {IDLE_TIMEOUT_HOURS:.0f}+ "
+                    f"hours: {names}"
+                )
+                remaining = await asyncio.to_thread(list_active_sessions)
+                if remaining:
+                    for chunk in format_session_listing(remaining):
+                        await channel.send(chunk)
+                else:
+                    await channel.send("No sessions still running.")
+        await asyncio.sleep(IDLE_CHECK_INTERVAL_SECONDS)
+
 
 @client.event
 async def on_ready():
+    global _reaper_task
     print(f"Logged in as {client.user} (id={client.user.id})")
     print(f"Watching channel {ALLOWED_CHANNEL_ID} for user {ALLOWED_USER_ID}")
     print(f"GIT_ROOT = {GIT_ROOT}")
+    print(f"Idle session timeout: {IDLE_TIMEOUT_HOURS:.0f}h")
+    if _reaper_task is None or _reaper_task.done():
+        _reaper_task = client.loop.create_task(idle_reaper_loop())
 
 
 @client.event
@@ -395,8 +482,10 @@ async def on_message(message: discord.Message):
             "!kill <number>      Kill a session by number (from !status)\n"
             "!kill <name>        Kill a session by name\n"
             "!stats              Show Pi CPU / RAM / disk / temp / uptime\n"
+            "!bash <command>     Run a raw shell command on the Pi\n"
             "!help               Show this message\n"
-            "```"
+            "```\n"
+            f"Sessions idle {IDLE_TIMEOUT_HOURS:.0f}+ hours are auto-killed."
         )
         return
 
@@ -429,6 +518,15 @@ async def on_message(message: discord.Message):
         return
 
     command, _, rest = content.partition(" ")
+    if command.lower() in BASH_COMMANDS:
+        raw = rest.strip()
+        if not raw:
+            await message.channel.send("Usage: `!bash <command>`")
+            return
+        reply = await asyncio.to_thread(run_bash_command, raw)
+        await message.channel.send(reply)
+        return
+
     if command.lower() in KILL_COMMANDS:
         arg = rest.strip()
         if not arg:
