@@ -1,17 +1,28 @@
 # claude-open
 
-Discord bot for this Pi: DM/message it in one private channel, it lists the
-git repos under `~/git`, you reply with a number, it launches
-`claude --remote-control` inside that repo in a detached tmux session so you
-can pick the session up from the Claude app / claude.ai/code.
+Discord bot for controlling Claude Code sessions from your phone. Message it
+in a private Discord channel, it lists the git repos under `~/git`, you reply
+with a number, it launches `claude --remote-control` in a detached tmux
+session so you can pick it up from the Claude app / claude.ai/code.
+
+Supports multiple machines (Pis, Macs, etc.) sharing one channel — each
+machine only responds when you address it by hostname.
 
 ## 1. Install tmux (one-time, needs sudo)
 
+**Linux / Raspberry Pi**
 ```
 sudo apt-get install -y tmux
 ```
 
-## 2. Create the Discord bot application
+**macOS**
+```
+brew install tmux
+```
+
+## 2. Create a Discord bot application (one per machine)
+
+Each machine needs its own bot token. For each one:
 
 1. Go to https://discord.com/developers/applications -> **New Application**.
 2. **Bot** tab -> **Reset Token** -> copy it (this is `DISCORD_BOT_TOKEN`).
@@ -19,18 +30,22 @@ sudo apt-get install -y tmux
    **Message Content Intent**. Save changes.
 4. **OAuth2 -> URL Generator** -> scope `bot` -> permissions
    `Send Messages` + `Read Message History` -> open the generated URL and
-   invite the bot to a server only you can see (e.g. a private server with
-   one channel).
+   invite the bot to **the same private server/channel on every machine**.
 5. In Discord, enable Developer Mode (User Settings -> Advanced), then:
    - Right-click your own name -> **Copy User ID** -> `ALLOWED_USER_ID`.
-   - Right-click the private channel -> **Copy Channel ID** -> `ALLOWED_CHANNEL_ID`.
+   - Right-click the private channel -> **Copy Channel ID** -> `ALLOWED_CHANNEL_ID`
+     (same value on every machine).
 
 ## 3. Configure
 
 ```
 cp .env.example .env
-# edit .env and fill in DISCORD_BOT_TOKEN, ALLOWED_USER_ID, ALLOWED_CHANNEL_ID
+# edit .env — each machine gets its own DISCORD_BOT_TOKEN;
+# ALLOWED_USER_ID and ALLOWED_CHANNEL_ID are the same on every machine
 ```
+
+If you have multiple machines, also set `KNOWN_DEVICES` (see
+[Multi-machine setup](#multi-machine-setup) below).
 
 ## 4. Run it manually to test
 
@@ -38,11 +53,13 @@ cp .env.example .env
 .venv/bin/python bot.py
 ```
 
-In the private channel, send `!repos`. You should get a numbered list of
-folders under `~/git` that contain a `.git` directory. Reply with a number
-and it should start a session.
+If running a single machine, send `!repos` in the channel. With multiple
+machines, type the device's hostname first (e.g. `raspberrypi`) to activate
+it, then `!repos`.
 
 ## 5. Run it as a service (auto-start on boot)
+
+**Linux / Raspberry Pi (systemd)**
 
 ```
 sudo cp claude-discord-bot.service /etc/systemd/system/
@@ -52,6 +69,49 @@ sudo systemctl status claude-discord-bot
 ```
 
 Logs: `journalctl -u claude-discord-bot -f`
+
+**macOS — run in a tmux session**
+
+```
+tmux new-session -d -s discord-bot '.venv/bin/python bot.py'
+```
+
+Attach to check on it: `tmux attach -t discord-bot`. No service file needed.
+
+## Multi-machine setup
+
+Multiple machines (Pis, Macs, etc.) can share a single Discord channel. Each
+machine runs its own bot with its own token but the same `ALLOWED_CHANNEL_ID`.
+
+Add `KNOWN_DEVICES` to every machine's `.env` — a comma-separated list of all
+hostnames sharing the channel:
+
+```
+KNOWN_DEVICES=raspberrypi,macbook,macmini
+```
+
+**How it works:**
+
+- Type a machine's hostname alone to activate it:
+  ```
+  raspberrypi
+  ```
+  That bot replies: `Ready — raspberrypi active.`
+- Commands then go to that machine without a prefix:
+  ```
+  !repos
+  0
+  ```
+- Type another hostname to switch machines — the active one steps back silently.
+- You can also one-shot a command without prior activation:
+  ```
+  macbook !stats
+  ```
+- `!help` with no machine active shows all online bots (each announces itself),
+  acting as a live device list.
+
+The active window lasts `ACTIVE_DURATION_SECONDS` (default 4 hours), after
+which you'll need to type the hostname again.
 
 ## Usage
 

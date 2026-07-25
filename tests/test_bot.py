@@ -326,9 +326,12 @@ def make_message(content, author_id=None, channel_id=None, is_bot=False):
 def clear_pending_listings():
     bot.pending_listings.clear()
     bot.pending_sessions.clear()
+    bot.active_until.clear()
+    bot.activate(bot.ALLOWED_CHANNEL_ID)
     yield
     bot.pending_listings.clear()
     bot.pending_sessions.clear()
+    bot.active_until.clear()
 
 
 async def test_on_message_ignores_other_users():
