@@ -16,12 +16,14 @@ Only responds to one Discord user in one Discord channel (see .env).
 """
 
 import asyncio
+import hashlib
 import os
 import re
 import shutil
 import socket
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 
 import discord
@@ -67,6 +69,7 @@ STATS_COMMANDS = {"!stats", "!stat", "!pi", "!sys"}
 BASH_COMMANDS = {"!bash", "!sh", "!exec"}
 HELP_COMMANDS = {"!help", "!h", "!?"}
 DEVICE_COMMANDS = {"!devices", "!device", "!pis"}
+ACTIVITY_COMMANDS = {"!activity", "!idle", "!when"}
 
 # Hostnames of all Pis sharing this channel (comma-separated in .env).
 # Used to detect when another device is being addressed so this bot stays silent.
@@ -94,6 +97,9 @@ pending_sessions: dict[int, list[str]] = {}
 
 # Per-channel: when this device's active window expires (monotonic seconds).
 active_until: dict[int, float] = {}
+
+# Per-session: (pane_content_hash, unix_timestamp_of_last_change)
+_pane_snapshots: dict[str, tuple[str, float]] = {}
 
 
 def is_active(channel_id: int) -> bool:
@@ -143,6 +149,42 @@ def format_session_listing(sessions: list[str]) -> list[str]:
     )
 
 
+def _format_idle(hours: float) -> str:
+    if hours < 1 / 60:
+        return "just now"
+    if hours < 1:
+        return f"{int(hours * 60)}m ago"
+    if hours < 24:
+        h, m = int(hours), int((hours % 1) * 60)
+        return f"{h}h {m}m ago" if m else f"{h}h ago"
+    d, h = int(hours // 24), int(hours % 24)
+    return f"{d}d {h}h ago" if h else f"{d}d ago"
+
+
+def session_activity_report() -> str:
+    """Build a Discord-ready report of last activity per session (updates pane snapshots first)."""
+    sessions = list_active_sessions()
+    if not sessions:
+        return "No sessions running."
+    for name in sessions:
+        _update_pane_snapshot(name)
+    idle = list_session_idle_hours()
+    now = time.time()
+    lines = []
+    for name in sessions:
+        hours = idle.get(name, 0)
+        overall_dt = datetime.fromtimestamp(now - hours * 3600).strftime("%Y-%m-%d %H:%M")
+        claude_mtime = _claude_project_mtime(name)
+        if claude_mtime:
+            claude_str = datetime.fromtimestamp(claude_mtime).strftime("%Y-%m-%d %H:%M")
+        else:
+            claude_str = "—"
+        lines.append(
+            f"{name:<32} {_format_idle(hours):<16} ({overall_dt})  claude: {claude_str}"
+        )
+    return "```\n" + "\n".join(lines) + "\n```"
+
+
 def sanitize_session_name(name: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_-]", "-", name)
     return cleaned or "claude-session"
@@ -182,8 +224,55 @@ def kill_session(session_name: str) -> str:
     return f"Stopped session **{session_name}**."
 
 
+def _update_pane_snapshot(session_name: str) -> float:
+    """Capture pane content; update stored timestamp if it changed. Returns last-changed time."""
+    result = subprocess.run(
+        [TMUX_BIN, "capture-pane", "-t", session_name, "-p"],
+        capture_output=True,
+        text=True,
+    )
+    old_hash, ts = _pane_snapshots.get(session_name, ("", 0.0))
+    if result.returncode != 0:
+        return ts
+    new_hash = hashlib.md5(result.stdout.encode()).hexdigest()
+    now = time.time()
+    if new_hash != old_hash:
+        ts = now
+    _pane_snapshots[session_name] = (new_hash, ts)
+    return ts
+
+
+def _claude_project_mtime(session_name: str) -> float | None:
+    """Return the most recent JSONL mtime under ~/.claude/projects/ for this session's working dir."""
+    pane = subprocess.run(
+        [TMUX_BIN, "display-message", "-t", session_name, "-p", "#{pane_current_path}"],
+        capture_output=True,
+        text=True,
+    )
+    if pane.returncode != 0 or not pane.stdout.strip():
+        return None
+
+    work_dir = pane.stdout.strip()
+    project_key = work_dir.replace("/", "-")
+    project_dir = Path.home() / ".claude" / "projects" / project_key
+
+    if not project_dir.is_dir():
+        return None
+
+    latest: float | None = None
+    for f in project_dir.iterdir():
+        if f.suffix == ".jsonl":
+            try:
+                mtime = f.stat().st_mtime
+                if latest is None or mtime > latest:
+                    latest = mtime
+            except OSError:
+                pass
+    return latest
+
+
 def list_session_idle_hours() -> dict[str, float]:
-    """Map session name -> hours since that session last had any activity."""
+    """Map session name -> hours since last detected activity (pane change, ~/.claude writes, or tmux activity)."""
     result = subprocess.run(
         [TMUX_BIN, "list-sessions", "-F", "#{session_name} #{session_activity}"],
         capture_output=True,
@@ -198,7 +287,18 @@ def list_session_idle_hours() -> dict[str, float]:
         name, _, ts = line.rpartition(" ")
         if not name or not ts.isdigit():
             continue
-        idle_hours[name] = (now - int(ts)) / 3600
+
+        candidates = [int(ts)]
+
+        _, pane_ts = _pane_snapshots.get(name, ("", 0.0))
+        if pane_ts:
+            candidates.append(pane_ts)
+
+        file_mtime = _claude_project_mtime(name)
+        if file_mtime:
+            candidates.append(file_mtime)
+
+        idle_hours[name] = (now - max(candidates)) / 3600
     return idle_hours
 
 
@@ -206,7 +306,7 @@ def reap_idle_sessions(timeout_hours: float = IDLE_TIMEOUT_HOURS) -> list[str]:
     """Kill tmux sessions idle for at least timeout_hours. Returns names killed."""
     killed = []
     for name, hours in list_session_idle_hours().items():
-        if hours >= timeout_hours:
+        if hours >= timeout_hours and not _session_has_live_claude(name):
             subprocess.run([TMUX_BIN, "kill-session", "-t", name], capture_output=True)
             killed.append(name)
     return killed
@@ -456,6 +556,8 @@ _reaper_task: asyncio.Task | None = None
 async def idle_reaper_loop():
     """Periodically kill tmux sessions idle for IDLE_TIMEOUT_HOURS+ and report it."""
     while not client.is_closed():
+        for name in await asyncio.to_thread(list_active_sessions):
+            await asyncio.to_thread(_update_pane_snapshot, name)
         killed = await asyncio.to_thread(reap_idle_sessions)
         if killed:
             channel = client.get_channel(ALLOWED_CHANNEL_ID)
@@ -536,6 +638,7 @@ async def on_message(message: discord.Message):
             "!status             List running sessions\n"
             "!kill <number>      Kill a session by number (from !status)\n"
             "!kill <name>        Kill a session by name\n"
+            "!activity           Show last activity time per session\n"
             "!stats              Show Pi CPU / RAM / disk / temp / uptime\n"
             "!bash <command>     Run a raw shell command on the Pi\n"
             "!help               Show this message\n"
@@ -543,6 +646,10 @@ async def on_message(message: discord.Message):
             "```\n"
             f"Sessions idle {IDLE_TIMEOUT_HOURS:.0f}+ hours are auto-killed."
         )
+        return
+
+    if content.lower() in ACTIVITY_COMMANDS:
+        await message.channel.send(await asyncio.to_thread(session_activity_report))
         return
 
     if content.lower() in STATS_COMMANDS:
