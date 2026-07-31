@@ -220,10 +220,10 @@ def test_reap_idle_sessions_kills_only_sessions_past_threshold():
         killed = bot.reap_idle_sessions(timeout_hours=72)
 
     assert killed == ["stale"]
-    run.assert_called_once()
-    args = run.call_args.args[0]
+    kill_calls = [c for c in run.call_args_list if "kill-session" in c.args[0]]
+    assert len(kill_calls) == 1
+    args = kill_calls[0].args[0]
     assert args[0] == bot.TMUX_BIN
-    assert "kill-session" in args
     assert "stale" in args
 
 
@@ -500,3 +500,64 @@ async def test_on_message_kill_reports_subprocess_failure():
 
     sent = message.channel.send.await_args.args[0]
     assert "Failed to stop session" in sent
+
+
+# ---- device activation ---------------------------------------------------
+
+def test_activate_makes_device_permanently_active():
+    bot.active_until.clear()
+    bot.activate(bot.ALLOWED_CHANNEL_ID)
+    assert bot.is_active(bot.ALLOWED_CHANNEL_ID)
+    assert bot.active_until[bot.ALLOWED_CHANNEL_ID] == float("inf")
+
+
+async def test_on_message_device_name_activates_and_confirms(monkeypatch):
+    bot.active_until.clear()
+    monkeypatch.setattr(bot, "DEVICE_NAME", "testpi")
+    monkeypatch.setattr(bot, "KNOWN_DEVICES", frozenset({"testpi"}))
+    message = make_message("testpi")
+
+    await bot.on_message(message)
+
+    assert bot.is_active(bot.ALLOWED_CHANNEL_ID)
+    sent = message.channel.send.await_args.args[0]
+    assert "testpi" in sent
+    assert "active" in sent.lower()
+
+
+async def test_on_message_other_device_name_deactivates(monkeypatch):
+    monkeypatch.setattr(bot, "DEVICE_NAME", "testpi")
+    monkeypatch.setattr(bot, "KNOWN_DEVICES", frozenset({"testpi", "othermac"}))
+    bot.activate(bot.ALLOWED_CHANNEL_ID)
+    assert bot.is_active(bot.ALLOWED_CHANNEL_ID)
+
+    message = make_message("othermac")
+    await bot.on_message(message)
+
+    assert not bot.is_active(bot.ALLOWED_CHANNEL_ID)
+    message.channel.send.assert_not_called()
+
+
+async def test_on_message_inactive_device_ignores_commands(monkeypatch):
+    bot.active_until.clear()
+    monkeypatch.setattr(bot, "DEVICE_NAME", "testpi")
+    monkeypatch.setattr(bot, "KNOWN_DEVICES", frozenset({"testpi"}))
+    message = make_message("!repos")
+
+    await bot.on_message(message)
+
+    message.channel.send.assert_not_called()
+
+
+async def test_on_message_prefixed_command_activates_and_runs(monkeypatch):
+    bot.active_until.clear()
+    monkeypatch.setattr(bot, "DEVICE_NAME", "testpi")
+    monkeypatch.setattr(bot, "KNOWN_DEVICES", frozenset({"testpi"}))
+    monkeypatch.setattr(bot, "list_repos", lambda: [])
+    message = make_message("testpi !repos")
+
+    await bot.on_message(message)
+
+    assert bot.is_active(bot.ALLOWED_CHANNEL_ID)
+    sent = message.channel.send.await_args.args[0]
+    assert "No git repos found" in sent

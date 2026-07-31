@@ -110,8 +110,7 @@ KNOWN_DEVICES=raspberrypi,macbook,macmini
 - `!help` with no machine active shows all online bots (each announces itself),
   acting as a live device list.
 
-The active window lasts `ACTIVE_DURATION_SECONDS` (default 4 hours), after
-which you'll need to type the hostname again.
+The active device stays selected until you type another device name to switch.
 
 ## Usage
 

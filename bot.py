@@ -79,8 +79,6 @@ KNOWN_DEVICES = frozenset(
     if d.strip()
 )
 
-# How long a device stays "active" after selection before requiring re-activation.
-ACTIVE_DURATION_SECONDS = float(os.environ.get("ACTIVE_DURATION_SECONDS", str(4 * 3600)))
 
 BASH_TIMEOUT_SECONDS = float(os.environ.get("BASH_TIMEOUT_SECONDS", "60"))
 
@@ -107,7 +105,7 @@ def is_active(channel_id: int) -> bool:
 
 
 def activate(channel_id: int) -> None:
-    active_until[channel_id] = time.monotonic() + ACTIVE_DURATION_SECONDS
+    active_until[channel_id] = float("inf")
 
 
 def list_repos() -> list[Path]:
@@ -603,7 +601,7 @@ async def on_message(message: discord.Message):
     # Bare device name → activate this Pi and wait for commands.
     if raw_lower == DEVICE_NAME.lower():
         activate(channel_id)
-        await message.channel.send(f"Ready — **{DEVICE_NAME}** active. Send `!repos` or `!help`.")
+        await message.channel.send(f"Ready — **{DEVICE_NAME}** active. Type another device name to switch.")
         return
 
     # Prefixed command (e.g. "pi2 !repos") → activate and strip prefix.
@@ -644,7 +642,8 @@ async def on_message(message: discord.Message):
             "!help               Show this message\n"
             "<device-name>       Switch to a different device\n"
             "```\n"
-            f"Sessions idle {IDLE_TIMEOUT_HOURS:.0f}+ hours are auto-killed."
+            f"Sessions idle {IDLE_TIMEOUT_HOURS:.0f}+ hours are auto-killed.\n"
+            "Active device stays selected until you type another device name."
         )
         return
 
