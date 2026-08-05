@@ -8,6 +8,9 @@ session so you can pick it up from the Claude app / claude.ai/code.
 Supports multiple machines (Pis, Macs, etc.) sharing one channel — each
 machine only responds when you address it by hostname.
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for a detailed description of the
+system design, data flow, and component breakdown.
+
 ## 1. Install tmux (one-time, needs sudo)
 
 **Linux / Raspberry Pi**
@@ -124,6 +127,7 @@ Send `!help` in the channel to get the full command list. Quick reference:
 | `!new <name>` | Create a new repo at `~/git/<name>` and launch a session |
 | `!status` | List running sessions |
 | `!kill <number\|name>` | Stop a session |
+| `!activity` | Show last activity time per session |
 | `!stats` | Show Pi CPU / RAM / disk / temp / uptime |
 | `!bash <command>` | Run a raw shell command on the Pi (aliases: `!sh`, `!exec`) |
 | `!help` | Show command list |
