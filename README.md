@@ -185,14 +185,6 @@ filtering, `!repos` / numeric-reply flow, error reporting), with `subprocess`
 and Discord objects mocked out — nothing touches a real tmux session or
 Discord server.
 
-## Also in this repo: API discovery scraper
-
-`api_discovery/` is a separate, standalone tool: a dynamic (headless-browser)
-website scraper that surfaces undocumented API endpoints a site's frontend
-calls. It's unrelated to the Discord bot above. See
-[api_discovery/README.md](api_discovery/README.md) — including the
-authorization requirements before pointing it at anything.
-
 ## Known gaps / possible improvements
 
 Not blocking for personal use, but worth knowing about:
