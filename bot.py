@@ -584,6 +584,9 @@ async def on_ready():
     print(f"Idle session timeout: {IDLE_TIMEOUT_HOURS:.0f}h")
     if _reaper_task is None or _reaper_task.done():
         _reaper_task = client.loop.create_task(idle_reaper_loop())
+    channel = client.get_channel(ALLOWED_CHANNEL_ID)
+    if channel:
+        await channel.send(f"**{DEVICE_NAME}** is online and activated to Discord.")
 
 
 @client.event
