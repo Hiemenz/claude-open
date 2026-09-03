@@ -41,8 +41,8 @@ All runtime logic lives in one file, organised into four layers.
 |---|---|---|
 | **Pure helpers** | `list_repos`, `sanitize_session_name`, `_repo_session_name`, `format_*`, `_format_idle` | No I/O; easy to unit-test |
 | **tmux interface** | `tmux_session_exists`, `list_active_sessions`, `kill_session`, `_update_pane_snapshot`, `_claude_project_mtime`, `list_session_idle_hours`, `reap_idle_sessions`, `_session_has_live_claude` | Subprocess calls to tmux / pgrep / git |
-| **Session lifecycle** | `launch_remote_control`, `create_and_launch`, `clone_and_launch`, `_extract_session_url`, `_extract_auth_prompt` | Orchestrates tmux + async polling |
-| **Discord event handlers** | `on_ready`, `on_message`, `idle_reaper_loop` | Drives the bot; routes commands |
+| **Session lifecycle** | `launch_remote_control`, `create_and_launch`, `clone_and_launch`, `_extract_session_url`, `_extract_auth_prompt`, `claude_login_status` | Orchestrates tmux + async polling |
+| **Discord event handlers** | `on_ready`, `on_message`, `idle_reaper_loop`, `_check_login_and_alert` | Drives the bot; routes commands |
 
 ### External dependencies
 
@@ -95,7 +95,23 @@ user: "2"
       └─ tmux new-session -d -s <name> -c <repo> "claude --remote-control <name>"
             ├─ poll pane 15s for SESSION_URL_RE → reply with URL
             └─ if no URL: poll 5s for auth prompt → reply "Authorization required"
+                  └─ if no auth prompt either: claude_login_status() → if logged out,
+                     reply "not logged in on <device> — run `claude auth login`"
 ```
+
+### Login status
+
+`claude auth status --json` is the source of truth for whether this device is
+authenticated. It's checked in three places:
+
+1. **On startup** (`on_ready`) — announces to Discord if the device isn't
+   logged in, right after the "online" message.
+2. **On a session launch with no URL** — see the flow above; distinguishes
+   "waiting on an OAuth prompt" from "not logged in at all".
+3. **Every idle-reaper cycle** (`_check_login_and_alert`, hourly) — catches a
+   token expiring while the bot is otherwise idle. A module-level flag
+   (`_login_alert_sent`) suppresses repeat alerts until the status flips back
+   to logged in, so it warns once per outage rather than every hour.
 
 ### Session naming
 

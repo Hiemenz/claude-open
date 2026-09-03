@@ -145,6 +145,78 @@ async def test_launch_remote_control_propagates_subprocess_error(tmp_path):
             await bot.launch_remote_control(repo)
 
 
+async def test_launch_remote_control_reports_not_logged_in_when_no_url_or_auth_prompt(tmp_path):
+    repo = tmp_path / "my-repo"
+    repo.mkdir()
+
+    with patch("bot.tmux_session_exists", return_value=False), \
+         patch("bot._extract_session_url", new=AsyncMock(return_value=None)), \
+         patch("bot._extract_auth_prompt", new=AsyncMock(return_value=None)), \
+         patch("bot.claude_login_status", return_value=(False, None)), \
+         patch("bot.subprocess.run") as run:
+        reply, auth = await bot.launch_remote_control(repo)
+
+    run.assert_called_once()
+    assert "Started remote-control session" in reply
+    assert auth is not None
+    assert "not logged in" in auth
+    assert bot.DEVICE_NAME in auth
+
+
+async def test_launch_remote_control_no_auth_message_when_logged_in_and_no_url(tmp_path):
+    repo = tmp_path / "my-repo"
+    repo.mkdir()
+
+    with patch("bot.tmux_session_exists", return_value=False), \
+         patch("bot._extract_session_url", new=AsyncMock(return_value=None)), \
+         patch("bot._extract_auth_prompt", new=AsyncMock(return_value=None)), \
+         patch("bot.claude_login_status", return_value=(True, "me@example.com")), \
+         patch("bot.subprocess.run") as run:
+        reply, auth = await bot.launch_remote_control(repo)
+
+    run.assert_called_once()
+    assert auth is None
+
+
+# ---- claude_login_status --------------------------------------------------
+
+def test_claude_login_status_parses_logged_in_json():
+    completed = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout='{"loggedIn": true, "email": "me@example.com"}'
+    )
+    with patch("bot.subprocess.run", return_value=completed):
+        logged_in, email = bot.claude_login_status()
+
+    assert logged_in is True
+    assert email == "me@example.com"
+
+
+def test_claude_login_status_parses_logged_out_json():
+    completed = subprocess.CompletedProcess(args=[], returncode=0, stdout='{"loggedIn": false}')
+    with patch("bot.subprocess.run", return_value=completed):
+        logged_in, email = bot.claude_login_status()
+
+    assert logged_in is False
+    assert email is None
+
+
+def test_claude_login_status_returns_none_on_timeout():
+    with patch("bot.subprocess.run", side_effect=subprocess.TimeoutExpired("claude", 10)):
+        logged_in, email = bot.claude_login_status()
+
+    assert logged_in is None
+    assert email is None
+
+
+def test_claude_login_status_returns_none_on_bad_json():
+    completed = subprocess.CompletedProcess(args=[], returncode=1, stdout="not json")
+    with patch("bot.subprocess.run", return_value=completed):
+        logged_in, email = bot.claude_login_status()
+
+    assert logged_in is None
+    assert email is None
+
+
 # ---- list_active_sessions ------------------------------------------------
 
 def test_list_active_sessions_parses_tmux_output():
