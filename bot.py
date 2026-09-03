@@ -17,6 +17,7 @@ Only responds to one Discord user in one Discord channel (see .env).
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -376,6 +377,24 @@ async def _extract_auth_prompt(session_name: str, timeout: float = 5.0) -> str |
     return None
 
 
+def claude_login_status(timeout: float = 10.0) -> tuple[bool | None, str | None]:
+    """Return (logged_in, email) via `claude auth status`. logged_in is None if the check failed."""
+    try:
+        result = subprocess.run(
+            [CLAUDE_BIN, "auth", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None, None
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None, None
+    return data.get("loggedIn"), data.get("email")
+
+
 async def launch_remote_control(
     repo_path: Path,
     channel_name: str = "",
@@ -426,6 +445,13 @@ async def launch_remote_control(
         auth = None
     else:
         auth = await _extract_auth_prompt(session_name)
+        if not auth:
+            logged_in, _ = await asyncio.to_thread(claude_login_status)
+            if logged_in is False:
+                auth = (
+                    f"not logged in on **{DEVICE_NAME}** — run `claude auth login` "
+                    "on the device, then try again."
+                )
         suffix = " — pick it up in the Claude app / claude.ai/code."
 
     return (
@@ -550,6 +576,25 @@ client = discord.Client(intents=intents)
 
 _reaper_task: asyncio.Task | None = None
 
+# Whether we've already alerted Discord about being logged out, so the hourly
+# reaper loop doesn't re-send the same warning every cycle until logged back in.
+_login_alert_sent = False
+
+
+async def _check_login_and_alert(channel) -> None:
+    """Check `claude auth status`; alert Discord once on logout, clear once logged back in."""
+    global _login_alert_sent
+    logged_in, _ = await asyncio.to_thread(claude_login_status)
+    if logged_in is False and not _login_alert_sent:
+        _login_alert_sent = True
+        if channel:
+            await channel.send(
+                f"**{DEVICE_NAME}** is not logged in to Claude — run `claude auth login` "
+                "on the device to log in."
+            )
+    elif logged_in is True:
+        _login_alert_sent = False
+
 
 async def idle_reaper_loop():
     """Periodically kill tmux sessions idle for IDLE_TIMEOUT_HOURS+ and report it."""
@@ -557,8 +602,8 @@ async def idle_reaper_loop():
         for name in await asyncio.to_thread(list_active_sessions):
             await asyncio.to_thread(_update_pane_snapshot, name)
         killed = await asyncio.to_thread(reap_idle_sessions)
+        channel = client.get_channel(ALLOWED_CHANNEL_ID)
         if killed:
-            channel = client.get_channel(ALLOWED_CHANNEL_ID)
             if channel:
                 names = ", ".join(f"**{name}**" for name in killed)
                 await channel.send(
@@ -571,6 +616,7 @@ async def idle_reaper_loop():
                         await channel.send(chunk)
                 else:
                     await channel.send("No sessions still running.")
+        await _check_login_and_alert(channel)
         await asyncio.sleep(IDLE_CHECK_INTERVAL_SECONDS)
 
 
@@ -584,6 +630,15 @@ async def on_ready():
     print(f"Idle session timeout: {IDLE_TIMEOUT_HOURS:.0f}h")
     if _reaper_task is None or _reaper_task.done():
         _reaper_task = client.loop.create_task(idle_reaper_loop())
+    channel = client.get_channel(ALLOWED_CHANNEL_ID)
+    if channel:
+        await channel.send(f"**{DEVICE_NAME}** is online and activated to Discord.")
+        logged_in, _ = await asyncio.to_thread(claude_login_status)
+        if logged_in is False:
+            await channel.send(
+                f"**{DEVICE_NAME}** is not logged in to Claude — run `claude auth login` "
+                "on the device to log in."
+            )
 
 
 @client.event
