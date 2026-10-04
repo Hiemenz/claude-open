@@ -1,0 +1,52 @@
+# programs.toml — configure which programs this Pi can manage from Slack.
+# Copy this file to programs.toml and fill in your own entries.
+#
+# Each section is one program. The section name is used in commands:
+#   !start mlb_display    !stop mlb_display    !logs mlb_display
+#
+# Required keys:
+#   type          "systemd", "cron", or "script"
+#
+# Optional keys (all types):
+#   description   Human-readable label shown in the Slack panel
+#
+# For type = "systemd":
+#   service       systemd unit name (e.g. mlb_display.service)
+#   user_service  true if this is a user-level unit (no sudo); default false
+#
+# For type = "cron" or "script":
+#   command       path to the script or command to run (also accepted: "start")
+#   check         pgrep pattern to detect if running (defaults to first word of command)
+#   log           path to the log file for !logs (required for logs to work)
+
+# ---------- systemd services ----------
+
+[mlb_display]
+description = "MLB e-ink scoreboard (large screen)"
+type = "systemd"
+service = "mlb_display.service"
+
+[mlb_grid]
+description = "MLB e-ink scoreboard (grid screen)"
+type = "systemd"
+service = "mlb_grid.service"
+
+[weather]
+description = "Weather e-ink display"
+type = "systemd"
+service = "weather_display.service"
+
+# ---------- cron / script programs ----------
+
+[score_sync]
+description = "Hourly score sync"
+type = "cron"
+command = "/home/pi/scripts/sync_scores.sh"
+log = "/home/pi/logs/sync_scores.log"
+
+[image_rotate]
+description = "Rotate wallpaper every hour"
+type = "script"
+start = "/home/pi/scripts/rotate.py"
+check = "rotate.py"
+log = "/home/pi/logs/rotate.log"

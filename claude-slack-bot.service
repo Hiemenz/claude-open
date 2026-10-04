@@ -1,0 +1,17 @@
+[Unit]
+Description=Slack bot: pick a repo, launch claude --remote-control
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/git/claude-open
+ExecStart=/home/pi/git/claude-open/.venv/bin/python -u /home/pi/git/claude-open/slackbot.py
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=/home/pi/git/claude-open/.env
+Environment=PATH=/home/pi/.local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target
