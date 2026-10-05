@@ -929,7 +929,7 @@ def _programs_blocks(programs: dict) -> list:
 
 
 def _repos_blocks(repos: list[Path], sessions: list[str]) -> list:
-    """One row per repo: green + Kill if a session is running, grey + Launch if not."""
+    """One button per repo: repo name in the button text, Kill (red) or Launch (green)."""
     session_set = set(sessions)
     blocks: list[dict] = [
         {"type": "divider"},
@@ -941,30 +941,29 @@ def _repos_blocks(repos: list[Path], sessions: list[str]) -> list:
             "text": {"type": "mrkdwn", "text": f"_No repos found in `{GIT_ROOT}`_"},
         })
         return blocks
-    for repo in repos[:12]:  # cap to stay under Slack's 50-block limit
-        session_name = _repo_session_name(repo.name)
-        running = session_name in session_set
-        dot = ":large_green_circle:" if running else ":white_circle:"
-        button = (
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Kill"},
-                "action_id": f"session_kill:{session_name}",
-                "style": "danger",
-            }
-            if running else
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Launch"},
-                "action_id": f"repo_launch_named:{repo}",
-                "style": "primary",
-            }
-        )
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"{dot} *{repo.name}*"},
-            "accessory": button,
-        })
+    # Two buttons per actions row to save vertical space on mobile
+    repo_list = repos[:24]
+    for i in range(0, len(repo_list), 2):
+        pair = repo_list[i:i + 2]
+        elements = []
+        for repo in pair:
+            session_name = _repo_session_name(repo.name)
+            running = session_name in session_set
+            if running:
+                elements.append({
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": f"⏹ {repo.name}"},
+                    "action_id": f"session_kill:{session_name}",
+                    "style": "danger",
+                })
+            else:
+                elements.append({
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": f"▶ {repo.name}"},
+                    "action_id": f"repo_launch_named:{repo}",
+                    "style": "primary",
+                })
+        blocks.append({"type": "actions", "elements": elements})
     return blocks
 
 
