@@ -189,7 +189,9 @@ def list_active_sessions() -> list[str]:
 def kill_session(session_name: str) -> str:
     if not tmux_session_exists(session_name):
         return f"No running session named *{session_name}*."
-    subprocess.run([TMUX_BIN, "kill-session", "-t", session_name], check=True)
+    result = subprocess.run([TMUX_BIN, "kill-session", "-t", session_name], capture_output=True)
+    if result.returncode != 0:
+        return f"Session *{session_name}* already stopped."
     return f"Stopped session *{session_name}*."
 
 

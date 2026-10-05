@@ -212,8 +212,10 @@ def test_kill_session_reports_missing_session():
 
 
 def test_kill_session_kills_running_session():
+    mock_result = MagicMock()
+    mock_result.returncode = 0
     with patch("slackbot.tmux_session_exists", return_value=True), \
-         patch("slackbot.subprocess.run") as run:
+         patch("slackbot.subprocess.run", return_value=mock_result) as run:
         reply = slackbot.kill_session("my-repo")
 
     run.assert_called_once()
@@ -224,11 +226,13 @@ def test_kill_session_kills_running_session():
     assert "Stopped session" in reply
 
 
-def test_kill_session_propagates_subprocess_error():
+def test_kill_session_handles_race_condition():
+    mock_result = MagicMock()
+    mock_result.returncode = 1
     with patch("slackbot.tmux_session_exists", return_value=True), \
-         patch("slackbot.subprocess.run", side_effect=subprocess.CalledProcessError(1, "tmux")):
-        with pytest.raises(subprocess.CalledProcessError):
-            slackbot.kill_session("my-repo")
+         patch("slackbot.subprocess.run", return_value=mock_result):
+        reply = slackbot.kill_session("my-repo")
+    assert "already stopped" in reply
 
 
 # ---- list_session_idle_hours / reap_idle_sessions -----------------------
@@ -606,7 +610,8 @@ def test_handle_message_kill_by_name_sanitizes_and_kills():
 def test_handle_message_kill_reports_subprocess_failure():
     say = make_say()
     error = subprocess.CalledProcessError(1, "tmux")
-    with patch("slackbot.kill_session", side_effect=error):
+    with patch("slackbot.kill_session", side_effect=error), \
+         patch("slackbot._post_error"):
         slackbot._handle_message_content("!kill some-repo", slackbot.ALLOWED_CHANNEL_ID, say)
 
     assert "Failed to stop session" in say.call_args.kwargs["text"]
