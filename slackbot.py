@@ -59,7 +59,7 @@ def require_env(name: str) -> str:
 
 SLACK_BOT_TOKEN = require_env("SLACK_BOT_TOKEN")
 SLACK_APP_TOKEN = require_env("SLACK_APP_TOKEN")
-ALLOWED_USER_ID = require_env("SLACK_ALLOWED_USER_ID")
+ALLOWED_USER_ID = os.environ.get("SLACK_ALLOWED_USER_ID", "")  # blank = anyone in the channel
 ALLOWED_CHANNEL_ID = require_env("SLACK_ALLOWED_CHANNEL_ID")
 GIT_ROOT = Path(os.environ.get("GIT_ROOT", str(Path.home() / "git"))).expanduser().resolve()
 PROGRAMS_FILE = Path(
@@ -1310,7 +1310,9 @@ def main() -> None:
         user = event.get("user", "")
         channel_id = event.get("channel", "")
         raw = (event.get("text") or "").strip()
-        if not raw or user != ALLOWED_USER_ID or channel_id != ALLOWED_CHANNEL_ID:
+        if not raw or channel_id != ALLOWED_CHANNEL_ID:
+            return
+        if ALLOWED_USER_ID and user != ALLOWED_USER_ID:
             return
         _handle_message_content(raw, channel_id, say)
 
