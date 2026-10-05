@@ -38,7 +38,7 @@ import subprocess
 import threading
 import time
 import tomllib
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -417,6 +417,23 @@ def run_bash_command(command: str, timeout: float = BASH_TIMEOUT_SECONDS) -> str
     return f"{prefix}```\n{output}\n```"
 
 
+def _week_progress() -> str:
+    """Percentage of the week elapsed since Tuesday 11 PM (resets weekly)."""
+    now = datetime.now()
+    # Find the most recent Tuesday at 23:00
+    days_since_tuesday = (now.weekday() - 1) % 7  # Tuesday = weekday 1
+    reset = now.replace(hour=23, minute=0, second=0, microsecond=0) - timedelta(days=days_since_tuesday)
+    if now < reset:
+        reset -= timedelta(weeks=1)
+    elapsed = (now - reset).total_seconds()
+    week_seconds = 7 * 24 * 3600
+    pct = elapsed / week_seconds * 100
+    bar_len = 20
+    filled = round(pct / 100 * bar_len)
+    bar = "█" * filled + "░" * (bar_len - filled)
+    return f"Week:  {bar} {pct:.1f}%"
+
+
 def pi_stats() -> str:
     lines = [f"Host:  {DEVICE_NAME}"]
     cpu = subprocess.run(["top", "-bn1"], capture_output=True, text=True).stdout
@@ -447,6 +464,7 @@ def pi_stats() -> str:
     m = re.search(r"load average[s]?:\s*([\d.]+)", load.stdout)
     if m:
         lines.append(f"Load:  {m.group(1)} (1m avg)")
+    lines.append(_week_progress())
     return "```\n" + "\n".join(lines) + "\n```"
 
 
