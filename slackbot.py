@@ -283,8 +283,36 @@ def _session_has_live_claude(session_name: str) -> bool:
 
 
 AUTH_URL_RE = re.compile(r"https?://\S*(auth|login|oauth|authorize)\S*", re.IGNORECASE)
-SESSION_URL_RE = re.compile(r"https://claude\.ai/code/session_\S+")
+SESSION_URL_RE = re.compile(r"https://claude\.ai/code/session_[A-Za-z0-9]+")
 TRUST_PROMPT = "Is this a project you created or one you trust"
+
+
+def _fetch_url_via_rc(session_name: str, timeout: float = 4.0) -> str | None:
+    """Open the /rc menu in an existing Claude session and capture its URL."""
+    subprocess.run(
+        [TMUX_BIN, "send-keys", "-t", session_name, "/rc", "Enter"],
+        capture_output=True,
+    )
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            [TMUX_BIN, "capture-pane", "-t", session_name, "-p"],
+            capture_output=True,
+            text=True,
+        )
+        match = SESSION_URL_RE.search(result.stdout)
+        if match:
+            subprocess.run(
+                [TMUX_BIN, "send-keys", "-t", session_name, "Escape"],
+                capture_output=True,
+            )
+            return match.group(0)
+        time.sleep(0.3)
+    subprocess.run(
+        [TMUX_BIN, "send-keys", "-t", session_name, "Escape"],
+        capture_output=True,
+    )
+    return None
 
 
 def _extract_session_url(session_name: str, timeout: float = 15.0) -> str | None:
@@ -356,7 +384,7 @@ def launch_remote_control(
     device_tag = f"on *{DEVICE_NAME}*"
 
     if tmux_session_exists(session_name):
-        url = _extract_session_url(session_name, timeout=3.0)
+        url = _extract_session_url(session_name, timeout=3.0) or _fetch_url_via_rc(session_name)
         if url:
             return (
                 f"Session *{session_name}* is already running in `{repo_path}` "
