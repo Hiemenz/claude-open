@@ -1,0 +1,19 @@
+[project]
+name = "claude-open"
+version = "0.1.0"
+description = "Claude remote-control bot"
+authors = [
+    {name = "Hiemenz",email = "47609755+Hiemenz@users.noreply.github.com"}
+]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "python-dotenv (>=1.0) ; python_version >= \"3.11\" and python_version < \"4.0\"",
+    "slack-bolt (>=1.18) ; python_version >= \"3.11\" and python_version < \"4.0\"",
+    "hiemenz-utils @ git+https://github.com/Hiemenz/hiemenz-utils.git ; python_version >= \"3.11\" and python_version < \"4.0\""
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

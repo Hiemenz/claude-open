@@ -38,7 +38,7 @@ import subprocess
 import threading
 import time
 import tomllib
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -59,7 +59,7 @@ def require_env(name: str) -> str:
 
 SLACK_BOT_TOKEN = require_env("SLACK_BOT_TOKEN")
 SLACK_APP_TOKEN = require_env("SLACK_APP_TOKEN")
-ALLOWED_USER_ID = require_env("SLACK_ALLOWED_USER_ID")
+ALLOWED_USER_ID = os.environ.get("SLACK_ALLOWED_USER_ID", "")  # blank = anyone in the channel
 ALLOWED_CHANNEL_ID = require_env("SLACK_ALLOWED_CHANNEL_ID")
 GIT_ROOT = Path(os.environ.get("GIT_ROOT", str(Path.home() / "git"))).expanduser().resolve()
 PROGRAMS_FILE = Path(
@@ -189,7 +189,9 @@ def list_active_sessions() -> list[str]:
 def kill_session(session_name: str) -> str:
     if not tmux_session_exists(session_name):
         return f"No running session named *{session_name}*."
-    subprocess.run([TMUX_BIN, "kill-session", "-t", session_name], check=True)
+    result = subprocess.run([TMUX_BIN, "kill-session", "-t", session_name], capture_output=True)
+    if result.returncode != 0:
+        return f"Session *{session_name}* already stopped."
     return f"Stopped session *{session_name}*."
 
 
@@ -298,6 +300,8 @@ def _extract_session_url(session_name: str, timeout: float = 15.0) -> str | None
         if match:
             return match.group(0)
         if TRUST_PROMPT in pane:
+            subprocess.run([TMUX_BIN, "send-keys", "-t", session_name, "Down"])
+            time.sleep(0.1)
             subprocess.run([TMUX_BIN, "send-keys", "-t", session_name, "Enter"])
         time.sleep(0.5)
     return None
@@ -415,6 +419,23 @@ def run_bash_command(command: str, timeout: float = BASH_TIMEOUT_SECONDS) -> str
     return f"{prefix}```\n{output}\n```"
 
 
+def _week_progress() -> str:
+    """Percentage of the week elapsed since Tuesday 11 PM (resets weekly)."""
+    now = datetime.now()
+    # Find the most recent Tuesday at 23:00
+    days_since_tuesday = (now.weekday() - 1) % 7  # Tuesday = weekday 1
+    reset = now.replace(hour=23, minute=0, second=0, microsecond=0) - timedelta(days=days_since_tuesday)
+    if now < reset:
+        reset -= timedelta(weeks=1)
+    elapsed = (now - reset).total_seconds()
+    week_seconds = 7 * 24 * 3600
+    pct = elapsed / week_seconds * 100
+    bar_len = 20
+    filled = round(pct / 100 * bar_len)
+    bar = "█" * filled + "░" * (bar_len - filled)
+    return f"Week:  {bar} {pct:.1f}%"
+
+
 def pi_stats() -> str:
     lines = [f"Host:  {DEVICE_NAME}"]
     cpu = subprocess.run(["top", "-bn1"], capture_output=True, text=True).stdout
@@ -445,6 +466,7 @@ def pi_stats() -> str:
     m = re.search(r"load average[s]?:\s*([\d.]+)", load.stdout)
     if m:
         lines.append(f"Load:  {m.group(1)} (1m avg)")
+    lines.append(_week_progress())
     return "```\n" + "\n".join(lines) + "\n```"
 
 
@@ -696,6 +718,7 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
         if not prog:
             say(text=f"Unknown program `{name}`. Check `programs.toml`.")
             return
+        say(text=f"Starting *{name}*…")
         try:
             reply = start_program(name, prog)
         except subprocess.CalledProcessError as exc:
@@ -714,6 +737,7 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
         if not prog:
             say(text=f"Unknown program `{name}`. Check `programs.toml`.")
             return
+        say(text=f"Stopping *{name}*…")
         try:
             reply = stop_program(name, prog)
         except subprocess.CalledProcessError as exc:
@@ -732,6 +756,7 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
         if not prog:
             say(text=f"Unknown program `{name}`. Check `programs.toml`.")
             return
+        say(text=f"Restarting *{name}*…")
         try:
             if prog.get("type") == "systemd":
                 result = _systemctl("restart", prog)
@@ -759,6 +784,7 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
         if not prog:
             say(text=f"Unknown program `{name}`. Check `programs.toml`.")
             return
+        say(text=f"Fetching logs for *{name}*…")
         say(text=get_program_logs(name, prog))
         return
 
@@ -767,6 +793,7 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
         if not raw_cmd:
             say(text="Usage: `!bash <command>`")
             return
+        say(text=f"Running `{raw_cmd}`…")
         say(text=run_bash_command(raw_cmd))
         return
 
@@ -775,6 +802,7 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
         if not arg:
             say(text="Usage: `!kill <name>`  (use `!sessions` to see running sessions)")
             return
+        say(text=f"Killing *{arg}*…")
         try:
             reply = kill_session(sanitize_session_name(arg))
         except subprocess.CalledProcessError as exc:
@@ -788,6 +816,7 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
         if not name:
             say(text="Usage: `!new <project-name>`")
             return
+        say(text=f"Creating *{name}*…")
         try:
             reply, auth = create_and_launch(name)
         except subprocess.CalledProcessError as exc:
@@ -927,7 +956,7 @@ def _programs_blocks(programs: dict) -> list:
 
 
 def _repos_blocks(repos: list[Path], sessions: list[str]) -> list:
-    """One row per repo: green + Kill if a session is running, grey + Launch if not."""
+    """One button per repo: repo name in the button text, Kill (red) or Launch (green)."""
     session_set = set(sessions)
     blocks: list[dict] = [
         {"type": "divider"},
@@ -939,30 +968,29 @@ def _repos_blocks(repos: list[Path], sessions: list[str]) -> list:
             "text": {"type": "mrkdwn", "text": f"_No repos found in `{GIT_ROOT}`_"},
         })
         return blocks
-    for repo in repos[:12]:  # cap to stay under Slack's 50-block limit
-        session_name = _repo_session_name(repo.name)
-        running = session_name in session_set
-        dot = ":large_green_circle:" if running else ":white_circle:"
-        button = (
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Kill"},
-                "action_id": f"session_kill:{session_name}",
-                "style": "danger",
-            }
-            if running else
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Launch"},
-                "action_id": f"repo_launch_named:{repo}",
-                "style": "primary",
-            }
-        )
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"{dot} *{repo.name}*"},
-            "accessory": button,
-        })
+    # Two buttons per actions row to save vertical space on mobile
+    repo_list = repos[:24]
+    for i in range(0, len(repo_list), 2):
+        pair = repo_list[i:i + 2]
+        elements = []
+        for repo in pair:
+            session_name = _repo_session_name(repo.name)
+            running = session_name in session_set
+            if running:
+                elements.append({
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": f"⏹ {repo.name}"},
+                    "action_id": f"session_kill:{session_name}",
+                    "style": "danger",
+                })
+            else:
+                elements.append({
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": f"▶ {repo.name}"},
+                    "action_id": f"repo_launch_named:{repo}",
+                    "style": "primary",
+                })
+        blocks.append({"type": "actions", "elements": elements})
     return blocks
 
 
@@ -1011,6 +1039,7 @@ def main() -> None:
         if not prog:
             say(text=f"Program `{name}` not found in `programs.toml`.")
             return
+        say(text=f"Starting *{name}*…")
         try:
             reply = start_program(name, prog)
         except subprocess.CalledProcessError as exc:
@@ -1027,6 +1056,7 @@ def main() -> None:
         if not prog:
             say(text=f"Program `{name}` not found in `programs.toml`.")
             return
+        say(text=f"Stopping *{name}*…")
         try:
             reply = stop_program(name, prog)
         except subprocess.CalledProcessError as exc:
@@ -1043,6 +1073,7 @@ def main() -> None:
         if not prog:
             say(text=f"Program `{name}` not found in `programs.toml`.")
             return
+        say(text=f"Restarting *{name}*…")
         try:
             if prog.get("type") == "systemd":
                 result = _systemctl("restart", prog)
@@ -1070,6 +1101,7 @@ def main() -> None:
         if not prog:
             say(text=f"Program `{name}` not found in `programs.toml`.")
             return
+        say(text=f"Fetching logs for *{name}*…")
         say(text=get_program_logs(name, prog))
 
     # ---- Session actions ---------------------------------------------------
@@ -1078,6 +1110,7 @@ def main() -> None:
     def _session_kill(ack, body, client, say):
         ack()
         name = body["actions"][0]["action_id"].split(":", 1)[1]
+        say(text=f"Killing *{name}*…")
         try:
             reply = kill_session(name)
         except subprocess.CalledProcessError as exc:
@@ -1092,6 +1125,7 @@ def main() -> None:
     def _repo_launch_named(ack, body, client, say):
         ack()
         path = body["actions"][0]["action_id"].split(":", 1)[1]
+        say(text=f"Launching *{Path(path).name}*…")
         try:
             reply, auth = launch_remote_control(Path(path))
         except subprocess.CalledProcessError as exc:
@@ -1166,6 +1200,7 @@ def main() -> None:
         if not selected:
             client.chat_update(channel=body["channel"]["id"], ts=body["message"]["ts"], text="No repos available.", blocks=[])
             return
+        client.chat_update(channel=body["channel"]["id"], ts=body["message"]["ts"], text=f"Launching *{Path(selected).name}*…", blocks=[])
         try:
             reply, auth = launch_remote_control(Path(selected))
         except subprocess.CalledProcessError as exc:
@@ -1260,6 +1295,7 @@ def main() -> None:
             body["view"]["state"]["values"]
             ["bash_input_block"]["bash_input"]["value"]
         )
+        client.chat_postMessage(channel=ALLOWED_CHANNEL_ID, text=f"Running `{cmd}`…")
         client.chat_postMessage(channel=ALLOWED_CHANNEL_ID, text=run_bash_command(cmd))
 
     @app.view("new_project_modal")
@@ -1272,6 +1308,7 @@ def main() -> None:
         if not name:
             client.chat_postMessage(channel=ALLOWED_CHANNEL_ID, text="Project name cannot be empty.")
             return
+        client.chat_postMessage(channel=ALLOWED_CHANNEL_ID, text=f"Creating *{name}*…")
         try:
             reply, auth = create_and_launch(name)
         except subprocess.CalledProcessError as exc:
@@ -1310,7 +1347,9 @@ def main() -> None:
         user = event.get("user", "")
         channel_id = event.get("channel", "")
         raw = (event.get("text") or "").strip()
-        if not raw or user != ALLOWED_USER_ID or channel_id != ALLOWED_CHANNEL_ID:
+        if not raw or channel_id != ALLOWED_CHANNEL_ID:
+            return
+        if ALLOWED_USER_ID and user != ALLOWED_USER_ID:
             return
         _handle_message_content(raw, channel_id, say)
 
