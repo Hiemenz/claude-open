@@ -300,6 +300,8 @@ def _extract_session_url(session_name: str, timeout: float = 15.0) -> str | None
         if match:
             return match.group(0)
         if TRUST_PROMPT in pane:
+            subprocess.run([TMUX_BIN, "send-keys", "-t", session_name, "Down"])
+            time.sleep(0.1)
             subprocess.run([TMUX_BIN, "send-keys", "-t", session_name, "Enter"])
         time.sleep(0.5)
     return None
@@ -716,6 +718,7 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
         if not prog:
             say(text=f"Unknown program `{name}`. Check `programs.toml`.")
             return
+        say(text=f"Starting *{name}*…")
         try:
             reply = start_program(name, prog)
         except subprocess.CalledProcessError as exc:
@@ -734,6 +737,7 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
         if not prog:
             say(text=f"Unknown program `{name}`. Check `programs.toml`.")
             return
+        say(text=f"Stopping *{name}*…")
         try:
             reply = stop_program(name, prog)
         except subprocess.CalledProcessError as exc:
@@ -752,6 +756,7 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
         if not prog:
             say(text=f"Unknown program `{name}`. Check `programs.toml`.")
             return
+        say(text=f"Restarting *{name}*…")
         try:
             if prog.get("type") == "systemd":
                 result = _systemctl("restart", prog)
@@ -779,6 +784,7 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
         if not prog:
             say(text=f"Unknown program `{name}`. Check `programs.toml`.")
             return
+        say(text=f"Fetching logs for *{name}*…")
         say(text=get_program_logs(name, prog))
         return
 
@@ -787,6 +793,7 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
         if not raw_cmd:
             say(text="Usage: `!bash <command>`")
             return
+        say(text=f"Running `{raw_cmd}`…")
         say(text=run_bash_command(raw_cmd))
         return
 
@@ -795,6 +802,7 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
         if not arg:
             say(text="Usage: `!kill <name>`  (use `!sessions` to see running sessions)")
             return
+        say(text=f"Killing *{arg}*…")
         try:
             reply = kill_session(sanitize_session_name(arg))
         except subprocess.CalledProcessError as exc:
@@ -808,6 +816,7 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
         if not name:
             say(text="Usage: `!new <project-name>`")
             return
+        say(text=f"Creating *{name}*…")
         try:
             reply, auth = create_and_launch(name)
         except subprocess.CalledProcessError as exc:
@@ -1030,6 +1039,7 @@ def main() -> None:
         if not prog:
             say(text=f"Program `{name}` not found in `programs.toml`.")
             return
+        say(text=f"Starting *{name}*…")
         try:
             reply = start_program(name, prog)
         except subprocess.CalledProcessError as exc:
@@ -1046,6 +1056,7 @@ def main() -> None:
         if not prog:
             say(text=f"Program `{name}` not found in `programs.toml`.")
             return
+        say(text=f"Stopping *{name}*…")
         try:
             reply = stop_program(name, prog)
         except subprocess.CalledProcessError as exc:
@@ -1062,6 +1073,7 @@ def main() -> None:
         if not prog:
             say(text=f"Program `{name}` not found in `programs.toml`.")
             return
+        say(text=f"Restarting *{name}*…")
         try:
             if prog.get("type") == "systemd":
                 result = _systemctl("restart", prog)
@@ -1089,6 +1101,7 @@ def main() -> None:
         if not prog:
             say(text=f"Program `{name}` not found in `programs.toml`.")
             return
+        say(text=f"Fetching logs for *{name}*…")
         say(text=get_program_logs(name, prog))
 
     # ---- Session actions ---------------------------------------------------
@@ -1097,6 +1110,7 @@ def main() -> None:
     def _session_kill(ack, body, client, say):
         ack()
         name = body["actions"][0]["action_id"].split(":", 1)[1]
+        say(text=f"Killing *{name}*…")
         try:
             reply = kill_session(name)
         except subprocess.CalledProcessError as exc:
@@ -1111,6 +1125,7 @@ def main() -> None:
     def _repo_launch_named(ack, body, client, say):
         ack()
         path = body["actions"][0]["action_id"].split(":", 1)[1]
+        say(text=f"Launching *{Path(path).name}*…")
         try:
             reply, auth = launch_remote_control(Path(path))
         except subprocess.CalledProcessError as exc:
@@ -1185,6 +1200,7 @@ def main() -> None:
         if not selected:
             client.chat_update(channel=body["channel"]["id"], ts=body["message"]["ts"], text="No repos available.", blocks=[])
             return
+        client.chat_update(channel=body["channel"]["id"], ts=body["message"]["ts"], text=f"Launching *{Path(selected).name}*…", blocks=[])
         try:
             reply, auth = launch_remote_control(Path(selected))
         except subprocess.CalledProcessError as exc:
@@ -1279,6 +1295,7 @@ def main() -> None:
             body["view"]["state"]["values"]
             ["bash_input_block"]["bash_input"]["value"]
         )
+        client.chat_postMessage(channel=ALLOWED_CHANNEL_ID, text=f"Running `{cmd}`…")
         client.chat_postMessage(channel=ALLOWED_CHANNEL_ID, text=run_bash_command(cmd))
 
     @app.view("new_project_modal")
@@ -1291,6 +1308,7 @@ def main() -> None:
         if not name:
             client.chat_postMessage(channel=ALLOWED_CHANNEL_ID, text="Project name cannot be empty.")
             return
+        client.chat_postMessage(channel=ALLOWED_CHANNEL_ID, text=f"Creating *{name}*…")
         try:
             reply, auth = create_and_launch(name)
         except subprocess.CalledProcessError as exc:

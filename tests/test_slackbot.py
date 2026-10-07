@@ -449,7 +449,7 @@ def test_handle_message_bash_runs_command_and_replies():
         slackbot._handle_message_content("!bash echo hi", slackbot.ALLOWED_CHANNEL_ID, say)
 
     run_bash.assert_called_once_with("echo hi")
-    say.assert_called_once_with(text="```\nhi\n```")
+    assert say.call_args.kwargs["text"] == "```\nhi\n```"
 
 
 def test_handle_message_repos_with_none_found(monkeypatch):
@@ -535,7 +535,7 @@ def test_handle_message_start_known_program(monkeypatch):
     with patch("slackbot.start_program", return_value="Started *mlb*.") as sp:
         slackbot._handle_message_content("!start mlb", slackbot.ALLOWED_CHANNEL_ID, say)
     sp.assert_called_once_with("mlb", _SYSTEMD_PROG)
-    say.assert_called_once_with(text="Started *mlb*.")
+    assert say.call_args.kwargs["text"] == "Started *mlb*."
 
 
 def test_handle_message_start_propagates_error(monkeypatch):
@@ -560,7 +560,7 @@ def test_handle_message_stop_known_program(monkeypatch):
     with patch("slackbot.stop_program", return_value="Stopped *mlb*.") as sp:
         slackbot._handle_message_content("!stop mlb", slackbot.ALLOWED_CHANNEL_ID, say)
     sp.assert_called_once_with("mlb", _SYSTEMD_PROG)
-    say.assert_called_once_with(text="Stopped *mlb*.")
+    assert say.call_args.kwargs["text"] == "Stopped *mlb*."
 
 
 def test_handle_message_restart_no_arg_shows_usage():
@@ -589,7 +589,7 @@ def test_handle_message_logs_known_program(monkeypatch):
     with patch("slackbot.get_program_logs", return_value="*mlb* — last 20 lines:\n```\nlog\n```") as gl:
         slackbot._handle_message_content("!logs mlb", slackbot.ALLOWED_CHANNEL_ID, say)
     gl.assert_called_once_with("mlb", _SYSTEMD_PROG)
-    say.assert_called_once()
+    assert "log" in say.call_args.kwargs["text"]
 
 
 def test_handle_message_kill_without_arg_shows_usage():
@@ -604,7 +604,7 @@ def test_handle_message_kill_by_name_sanitizes_and_kills():
         slackbot._handle_message_content("!kill my repo!", slackbot.ALLOWED_CHANNEL_ID, say)
 
     kill.assert_called_once_with("my-repo-")
-    say.assert_called_once_with(text="Stopped!")
+    assert say.call_args.kwargs["text"] == "Stopped!"
 
 
 def test_handle_message_kill_reports_subprocess_failure():
@@ -623,4 +623,4 @@ def test_handle_message_stop_is_for_programs_not_sessions(monkeypatch):
     say = make_say()
     with patch("slackbot.stop_program", return_value="Stopped *mlb*."):
         slackbot._handle_message_content("!stop mlb", slackbot.ALLOWED_CHANNEL_ID, say)
-    say.assert_called_once_with(text="Stopped *mlb*.")
+    assert say.call_args.kwargs["text"] == "Stopped *mlb*."
