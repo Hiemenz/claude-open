@@ -317,6 +317,7 @@ def _fetch_url_via_rc(session_name: str, timeout: float = 4.0) -> str | None:
 
 def _extract_session_url(session_name: str, timeout: float = 15.0) -> str | None:
     deadline = time.monotonic() + timeout
+    trust_handled = False
     while time.monotonic() < deadline:
         result = subprocess.run(
             [TMUX_BIN, "capture-pane", "-t", session_name, "-p"],
@@ -327,10 +328,11 @@ def _extract_session_url(session_name: str, timeout: float = 15.0) -> str | None
         match = SESSION_URL_RE.search(pane)
         if match:
             return match.group(0)
-        if TRUST_PROMPT in pane:
+        if not trust_handled and TRUST_PROMPT in pane:
             subprocess.run([TMUX_BIN, "send-keys", "-t", session_name, "Down"])
             time.sleep(0.1)
             subprocess.run([TMUX_BIN, "send-keys", "-t", session_name, "Enter"])
+            trust_handled = True
         time.sleep(0.5)
     return None
 
@@ -384,7 +386,7 @@ def launch_remote_control(
     device_tag = f"on *{DEVICE_NAME}*"
 
     if tmux_session_exists(session_name):
-        url = _extract_session_url(session_name, timeout=3.0) or _fetch_url_via_rc(session_name)
+        url = _extract_session_url(session_name, timeout=1.0) or _fetch_url_via_rc(session_name)
         if url:
             return (
                 f"Session *{session_name}* is already running in `{repo_path}` "
