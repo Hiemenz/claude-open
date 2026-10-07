@@ -187,10 +187,19 @@ def test_claude_login_status_returns_none_on_bad_json():
 
 # ---- list_active_sessions -----------------------------------------------
 
+D = slackbot.DEVICE_NAME
+
+
 def test_list_active_sessions_parses_tmux_output():
     with patch("slackbot.subprocess.run") as run:
-        run.return_value = SimpleNamespace(returncode=0, stdout="alpha\nbeta\n")
-        assert slackbot.list_active_sessions() == ["alpha", "beta"]
+        run.return_value = SimpleNamespace(returncode=0, stdout=f"{D}-Alpha\n{D}-Beta\n")
+        assert slackbot.list_active_sessions() == [f"{D}-Alpha", f"{D}-Beta"]
+
+
+def test_list_active_sessions_ignores_non_claude_tmux_sessions():
+    with patch("slackbot.subprocess.run") as run:
+        run.return_value = SimpleNamespace(returncode=0, stdout=f"eink\n{D}-Alpha\nwork\n")
+        assert slackbot.list_active_sessions() == [f"{D}-Alpha"]
 
 
 def test_list_active_sessions_empty_when_no_server():
@@ -242,12 +251,23 @@ def test_list_session_idle_hours_parses_tmux_output(monkeypatch):
     with patch("slackbot.subprocess.run") as run:
         run.return_value = SimpleNamespace(
             returncode=0,
-            stdout="alpha 964000\nbeta 999999\n",
+            stdout=f"{D}-Alpha 964000\n{D}-Beta 999999\neink 1\n",
         )
         idle = slackbot.list_session_idle_hours()
 
-    assert idle["alpha"] == pytest.approx(10.0)
-    assert idle["beta"] == pytest.approx(1 / 3600)
+    assert idle[f"{D}-Alpha"] == pytest.approx(10.0)
+    assert idle[f"{D}-Beta"] == pytest.approx(1 / 3600)
+    assert "eink" not in idle  # never reap tmux sessions this bot didn't launch
+
+
+def test_claude_project_mtime_maps_underscores_like_claude_code(tmp_path, monkeypatch):
+    monkeypatch.setattr(slackbot.Path, "home", lambda: tmp_path)
+    project = tmp_path / ".claude" / "projects" / "-home-pi-git-mlb-display"
+    project.mkdir(parents=True)
+    (project / "s.jsonl").write_text("{}")
+    with patch("slackbot.subprocess.run") as run:
+        run.return_value = SimpleNamespace(returncode=0, stdout="/home/pi/git/mlb_display\n")
+        assert slackbot._claude_project_mtime(f"{D}-MlbDisplay") is not None
 
 
 def test_list_session_idle_hours_empty_when_no_server():
@@ -309,6 +329,17 @@ def test_run_bash_command_reports_no_output():
         reply = slackbot.run_bash_command("true")
 
     assert reply == "```\n(no output)\n```"
+
+
+def test_run_bash_command_truncates_long_output_keeping_tail():
+    long = "x" * 10_000 + "END"
+    with patch("slackbot.subprocess.run") as run:
+        run.return_value = SimpleNamespace(returncode=0, stdout=long, stderr="")
+        reply = slackbot.run_bash_command("cat big")
+
+    assert len(reply) < slackbot.MAX_OUTPUT_CHARS + 100
+    assert "truncated" in reply
+    assert reply.endswith("END\n```")
 
 
 def test_run_bash_command_handles_timeout():
@@ -379,6 +410,22 @@ def test_stop_program_script_running():
     with patch("slackbot.subprocess.run", return_value=SimpleNamespace(returncode=0)):
         reply = slackbot.stop_program("fetch", _SCRIPT_PROG)
     assert "Stopped" in reply
+
+
+def test_stop_program_uses_full_command_not_first_word():
+    prog = {"type": "script", "command": "python3 /home/pi/rotate.py"}
+    with patch("slackbot.subprocess.run", return_value=SimpleNamespace(returncode=0)) as run:
+        slackbot.stop_program("rotate", prog)
+    assert run.call_args.args[0] == ["pkill", "-f", "python3 /home/pi/rotate.py"]
+
+
+def test_stop_and_status_prefer_check_pattern():
+    prog = {"type": "script", "start": "python3 /home/pi/rotate.py", "check": "rotate.py"}
+    with patch("slackbot.subprocess.run", return_value=SimpleNamespace(returncode=0)) as run:
+        slackbot.stop_program("rotate", prog)
+        slackbot._program_is_running("rotate", prog)
+    assert run.call_args_list[0].args[0] == ["pkill", "-f", "rotate.py"]
+    assert run.call_args_list[1].args[0] == ["pgrep", "-f", "rotate.py"]
 
 
 def test_stop_program_script_not_running():
@@ -615,6 +662,94 @@ def test_handle_message_kill_reports_subprocess_failure():
         slackbot._handle_message_content("!kill some-repo", slackbot.ALLOWED_CHANNEL_ID, say)
 
     assert "Failed to stop session" in say.call_args.kwargs["text"]
+
+
+def test_handle_message_kill_by_number(monkeypatch):
+    monkeypatch.setattr(slackbot, "list_active_sessions", lambda: [f"{D}-Alpha", f"{D}-Beta"])
+    say = make_say()
+    with patch("slackbot.kill_session", return_value="Stopped!") as kill:
+        slackbot._handle_message_content("!kill 2", slackbot.ALLOWED_CHANNEL_ID, say)
+    kill.assert_called_once_with(f"{D}-Beta")
+
+
+def test_handle_message_kill_number_out_of_range(monkeypatch):
+    monkeypatch.setattr(slackbot, "list_active_sessions", lambda: [f"{D}-Alpha"])
+    say = make_say()
+    with patch("slackbot.kill_session") as kill:
+        slackbot._handle_message_content("!kill 5", slackbot.ALLOWED_CHANNEL_ID, say)
+    kill.assert_not_called()
+    assert "No session #5" in say.call_args.kwargs["text"]
+
+
+def test_handle_message_number_launches_repo(monkeypatch):
+    monkeypatch.setattr(slackbot, "list_repos", lambda: [Path("/git/alpha"), Path("/git/beta")])
+    say = make_say()
+    with patch("slackbot.launch_remote_control", return_value=("Started!", None)) as launch:
+        slackbot._handle_message_content("2", slackbot.ALLOWED_CHANNEL_ID, say)
+    launch.assert_called_once_with(Path("/git/beta"))
+    assert say.call_args.kwargs["text"] == "Started!"
+
+
+def test_handle_message_number_out_of_range(monkeypatch):
+    monkeypatch.setattr(slackbot, "list_repos", lambda: [Path("/git/alpha")])
+    say = make_say()
+    with patch("slackbot.launch_remote_control") as launch:
+        slackbot._handle_message_content("0", slackbot.ALLOWED_CHANNEL_ID, say)
+    launch.assert_not_called()
+    assert "No repo #0" in say.call_args.kwargs["text"]
+
+
+def test_handle_message_repos_dropdown_is_numbered(monkeypatch):
+    monkeypatch.setattr(slackbot, "list_repos", lambda: [Path("/git/alpha"), Path("/git/beta")])
+    say = make_say()
+    slackbot._handle_message_content("!repos", slackbot.ALLOWED_CHANNEL_ID, say)
+    select_block = next(b for b in say.call_args.kwargs["blocks"] if b.get("block_id") == "inline_repo_picker")
+    labels = [o["text"]["text"] for o in select_block["accessory"]["options"]]
+    assert labels == ["1. alpha", "2. beta"]
+
+
+def test_handle_message_unknown_command_replies():
+    say = make_say()
+    slackbot._handle_message_content("!frobnicate now", slackbot.ALLOWED_CHANNEL_ID, say)
+    assert "Unknown command `!frobnicate`" in say.call_args.kwargs["text"]
+
+
+def test_handle_message_plain_chat_is_ignored():
+    say = make_say()
+    slackbot._handle_message_content("just chatting", slackbot.ALLOWED_CHANNEL_ID, say)
+    say.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "<https://github.com/owner/repo>",
+        "<https://github.com/owner/repo|github.com/owner/repo>",
+        "https://github.com/owner/repo",
+    ],
+)
+def test_handle_message_github_url_unwraps_slack_link(text):
+    say = make_say()
+    with patch("slackbot.clone_and_launch", return_value=("Cloned!", None)) as clone:
+        slackbot._handle_message_content(text, slackbot.ALLOWED_CHANNEL_ID, say)
+    clone.assert_called_once_with("https://github.com/owner/repo")
+
+
+# ---- channel restriction ----------------------------------------------
+
+@pytest.mark.parametrize(
+    "body,allowed",
+    [
+        ({"type": "block_actions", "channel": {"id": "C0123456789"}}, True),
+        ({"type": "block_actions", "channel": {"id": "COTHER"}}, False),
+        ({"type": "event_callback", "event": {"type": "app_mention", "channel": "C0123456789"}}, True),
+        ({"type": "event_callback", "event": {"type": "app_mention", "channel": "COTHER"}}, False),
+        ({"type": "view_submission", "view": {}}, True),
+        ({"type": "block_actions"}, False),
+    ],
+)
+def test_is_allowed_request(body, allowed):
+    assert slackbot._is_allowed_request(body) is allowed
 
 
 def test_handle_message_stop_is_for_programs_not_sessions(monkeypatch):

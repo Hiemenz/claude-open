@@ -16,7 +16,8 @@
 #
 # For type = "cron" or "script":
 #   command       path to the script or command to run (also accepted: "start")
-#   check         pgrep pattern to detect if running (defaults to first word of command)
+#   check         pgrep -f / pkill -f pattern used to detect and stop it
+#                 (defaults to the full command)
 #   log           path to the log file for !logs (required for logs to work)
 
 # ---------- systemd services ----------

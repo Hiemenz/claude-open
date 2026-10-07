@@ -79,6 +79,13 @@ GIT_BIN = shutil.which("git") or "git"
 GITHUB_URL_RE = re.compile(
     r"https?://github\.com/(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+?)(?:\.git)?/?$"
 )
+# Slack delivers pasted links as <url> or <url|label>
+SLACK_LINK_RE = re.compile(r"<(?P<url>[^|>]+)(?:\|[^>]*)?>")
+
+
+def _unwrap_slack_link(text: str) -> str:
+    m = SLACK_LINK_RE.fullmatch(text)
+    return m.group("url") if m else text
 
 LIST_COMMANDS = {"!repos", "!repo", "!ls", "!claude"}
 SESSION_COMMANDS = {"!sessions", "!ps"}
@@ -95,6 +102,7 @@ HELP_COMMANDS = {"!help", "!h", "!?"}
 ACTIVITY_COMMANDS = {"!activity", "!idle", "!when"}
 
 BASH_TIMEOUT_SECONDS = float(os.environ.get("BASH_TIMEOUT_SECONDS", "60"))
+MAX_OUTPUT_CHARS = 3500  # keep code blocks well under Slack's message size limit
 
 _pane_snapshots: dict[str, tuple[str, float]] = {}
 _login_alert_sent = False
@@ -175,6 +183,11 @@ def tmux_session_exists(session_name: str) -> bool:
     )
 
 
+def _is_claude_session(session_name: str) -> bool:
+    """True for tmux sessions this bot launched (see _repo_session_name)."""
+    return session_name.startswith(DEVICE_NAME + "-")
+
+
 def list_active_sessions() -> list[str]:
     result = subprocess.run(
         [TMUX_BIN, "list-sessions", "-F", "#{session_name}"],
@@ -183,7 +196,7 @@ def list_active_sessions() -> list[str]:
     )
     if result.returncode != 0:
         return []
-    return [line for line in result.stdout.splitlines() if line]
+    return [line for line in result.stdout.splitlines() if line and _is_claude_session(line)]
 
 
 def kill_session(session_name: str) -> str:
@@ -221,7 +234,8 @@ def _claude_project_mtime(session_name: str) -> float | None:
     if pane.returncode != 0 or not pane.stdout.strip():
         return None
     work_dir = pane.stdout.strip()
-    project_dir = Path.home() / ".claude" / "projects" / work_dir.replace("/", "-")
+    # Claude Code maps every non-alphanumeric char in the path to "-"
+    project_dir = Path.home() / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", work_dir)
     if not project_dir.is_dir():
         return None
     latest: float | None = None
@@ -248,7 +262,7 @@ def list_session_idle_hours() -> dict[str, float]:
     idle_hours = {}
     for line in result.stdout.splitlines():
         name, _, ts = line.rpartition(" ")
-        if not name or not ts.isdigit():
+        if not name or not ts.isdigit() or not _is_claude_session(name):
             continue
         candidates = [int(ts)]
         _, pane_ts = _pane_snapshots.get(name, ("", 0.0))
@@ -436,6 +450,13 @@ def launch_remote_control(
     )
 
 
+def _truncate_output(output: str, limit: int = MAX_OUTPUT_CHARS) -> str:
+    """Keep the tail of long output, which is usually the interesting part."""
+    if len(output) <= limit:
+        return output
+    return f"…(truncated {len(output) - limit} chars)\n" + output[-limit:]
+
+
 def run_bash_command(command: str, timeout: float = BASH_TIMEOUT_SECONDS) -> str:
     try:
         result = subprocess.run(
@@ -448,7 +469,7 @@ def run_bash_command(command: str, timeout: float = BASH_TIMEOUT_SECONDS) -> str
         )
     except subprocess.TimeoutExpired:
         return f"Timed out after {timeout:.0f}s: `{command}`"
-    output = (result.stdout + result.stderr).strip() or "(no output)"
+    output = _truncate_output((result.stdout + result.stderr).strip() or "(no output)")
     prefix = "" if result.returncode == 0 else f"[exit {result.returncode}] "
     return f"{prefix}```\n{output}\n```"
 
@@ -554,13 +575,22 @@ def _systemctl(action: str, prog: dict) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
+def _program_pattern(prog: dict) -> str:
+    """pgrep/pkill -f pattern for a non-systemd program.
+
+    Uses the full command, not just its first word — `pkill -f python3` would
+    take down every Python process on the box, this bot included.
+    """
+    return (prog.get("check") or prog.get("command") or prog.get("start") or "").strip()
+
+
 def _program_is_running(name: str, prog: dict) -> bool:
     if prog.get("type") == "systemd":
         return _systemctl("is-active", prog).stdout.strip() == "active"
-    pattern = prog.get("check") or prog.get("command") or prog.get("start", "")
+    pattern = _program_pattern(prog)
     if not pattern:
         return False
-    return subprocess.run(["pgrep", "-f", pattern.split()[0]], capture_output=True).returncode == 0
+    return subprocess.run(["pgrep", "-f", pattern], capture_output=True).returncode == 0
 
 
 def _program_state_str(name: str, prog: dict) -> str:
@@ -612,10 +642,10 @@ def stop_program(name: str, prog: dict) -> str:
                 result.returncode, f"systemctl stop {prog.get('service')}", err
             )
         return f"Stopped *{name}*."
-    cmd = prog.get("command") or prog.get("start", "")
-    if not cmd:
+    pattern = _program_pattern(prog)
+    if not pattern:
         return f"No command configured for *{name}*."
-    result = subprocess.run(["pkill", "-f", cmd.split()[0]], capture_output=True)
+    result = subprocess.run(["pkill", "-f", pattern], capture_output=True)
     return f"Stopped *{name}*." if result.returncode == 0 else f"*{name}* was not running."
 
 
@@ -638,7 +668,7 @@ def get_program_logs(name: str, prog: dict, lines: int = LOG_LINES) -> str:
         if result.returncode != 0:
             return f"Could not read `{log_file}` for *{name}*."
         output = result.stdout.strip() or "(empty log)"
-    return f"*{name}* — last {lines} lines:\n```\n{output}\n```"
+    return f"*{name}* — last {lines} lines:\n```\n{_truncate_output(output)}\n```"
 
 
 # ---------------------------------------------------------------------------
@@ -660,7 +690,7 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
             "  !logs  <name>        Last 20 lines of logs\n"
             "\n"
             "Claude sessions\n"
-            "  !repos               List git repos\n"
+            "  !repos               List git repos (numbered)\n"
             "  <number>             Launch session for that repo\n"
             "  <github url>         Clone repo and launch session\n"
             "  !new <name>          Create repo and launch session\n"
@@ -694,7 +724,10 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
         if not repos:
             say(text=f"No git repos found under `{GIT_ROOT}`.")
             return
-        options = [{"text": {"type": "plain_text", "text": r.name}, "value": str(r)} for r in repos]
+        options = [
+            {"text": {"type": "plain_text", "text": f"{i}. {r.name}"}, "value": str(r)}
+            for i, r in enumerate(repos, 1)
+        ]
         say(blocks=[
             {"type": "section", "text": {"type": "mrkdwn", "text": "*Launch a Claude session*"}},
             {
@@ -725,10 +758,10 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
             say(text="No sessions running.")
             return
         blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "*Running Claude Sessions*"}}]
-        for name in sessions:
+        for i, name in enumerate(sessions, 1):
             blocks.append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"⚡ *{name}*"},
+                "text": {"type": "mrkdwn", "text": f"{i}. ⚡ *{name}*"},
                 "accessory": {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "Kill"},
@@ -836,9 +869,18 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
         if not arg:
             say(text="Usage: `!kill <name>`  (use `!sessions` to see running sessions)")
             return
-        say(text=f"Killing *{arg}*…")
+        if arg.isdigit():
+            sessions = list_active_sessions()
+            index = int(arg)
+            if not 1 <= index <= len(sessions):
+                say(text=f"No session #{index} — use `!sessions` to see running sessions.")
+                return
+            target = sessions[index - 1]
+        else:
+            target = sanitize_session_name(arg)
+        say(text=f"Killing *{target}*…")
         try:
-            reply = kill_session(sanitize_session_name(arg))
+            reply = kill_session(target)
         except subprocess.CalledProcessError as exc:
             _post_error("Failed to stop session", exc)
             reply = f"Failed to stop session: {exc}"
@@ -861,10 +903,11 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
             say(text=f"*Authorization required:* {auth}")
         return
 
-    if GITHUB_URL_RE.match(content):
+    url = _unwrap_slack_link(content)
+    if GITHUB_URL_RE.match(url):
         say(text="Cloning…")
         try:
-            reply, auth = clone_and_launch(content)
+            reply, auth = clone_and_launch(url)
         except subprocess.CalledProcessError as exc:
             _post_error("Failed to start session", exc)
             reply, auth = f"Failed to start session: {exc}", None
@@ -872,6 +915,48 @@ def _handle_message_content(content: str, channel_id: str, say) -> None:
         if auth:
             say(text=f"*Authorization required:* {auth}")
         return
+
+    if content.isdigit():
+        repos = list_repos()
+        index = int(content)
+        if not 1 <= index <= len(repos):
+            say(text=f"No repo #{index} — use `!repos` to see the list.")
+            return
+        repo = repos[index - 1]
+        say(text=f"Launching *{repo.name}*…")
+        try:
+            reply, auth = launch_remote_control(repo)
+        except subprocess.CalledProcessError as exc:
+            _post_error("Failed to start session", exc)
+            reply, auth = f"Failed to start session: {exc}", None
+        say(text=reply)
+        if auth:
+            say(text=f"*Authorization required:* {auth}")
+        return
+
+    if content.startswith("!"):
+        say(text=f"Unknown command `{command}` — try `!help`.")
+
+
+def _request_channel(body: dict) -> str | None:
+    """Channel a Slack request came from (button click or event), if any."""
+    channel = body.get("channel")
+    if isinstance(channel, dict):
+        return channel.get("id")
+    if isinstance(channel, str):
+        return channel
+    return (body.get("event") or {}).get("channel")
+
+
+def _is_allowed_request(body: dict) -> bool:
+    """Only serve requests from ALLOWED_CHANNEL_ID.
+
+    Modal submissions carry no channel, but the modals are only opened by
+    buttons that already passed this check, so they're let through.
+    """
+    if body.get("type") == "view_submission":
+        return True
+    return _request_channel(body) == ALLOWED_CHANNEL_ID
 
 
 # ---------------------------------------------------------------------------
@@ -1034,6 +1119,7 @@ def _repos_blocks(repos: list[Path], sessions: list[str]) -> list:
 
 def main() -> None:
     from hiemenz_utils.slack_bot import SlackBot
+    from slack_bolt import BoltResponse
     from slack_sdk import WebClient
 
     slack_client = WebClient(token=SLACK_BOT_TOKEN)
@@ -1322,6 +1408,14 @@ def main() -> None:
 
     app = bot._get_app()
 
+    @app.middleware
+    def _only_allowed_channel(body, next):
+        # Covers buttons, modals and the @mention panel, not just messages.
+        if _is_allowed_request(body):
+            return next()
+        # Ack and drop without running any listener.
+        return BoltResponse(status=200, body="")
+
     @app.view("bash_modal")
     def _bash_submit(ack, body, client):
         ack()
@@ -1358,7 +1452,7 @@ def main() -> None:
         url = (
             body["view"]["state"]["values"]
             ["github_url_block"]["github_url"]["value"]
-        )
+        ).strip()
         client.chat_postMessage(channel=ALLOWED_CHANNEL_ID, text="Cloning…")
         try:
             reply, auth = clone_and_launch(url)
