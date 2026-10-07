@@ -264,7 +264,7 @@ def list_session_idle_hours() -> dict[str, float]:
 def reap_idle_sessions(timeout_hours: float = IDLE_TIMEOUT_HOURS) -> list[str]:
     killed = []
     for name, hours in list_session_idle_hours().items():
-        if hours >= timeout_hours and not _session_has_live_claude(name):
+        if hours >= timeout_hours:
             subprocess.run([TMUX_BIN, "kill-session", "-t", name], capture_output=True)
             killed.append(name)
     return killed
