@@ -278,8 +278,12 @@ def _session_has_live_claude(session_name: str) -> bool:
     )
     if pane.returncode != 0 or not pane.stdout.strip():
         return False
-    pane_pid = pane.stdout.strip().split()[0]
-    return subprocess.run(["pgrep", "-P", pane_pid], capture_output=True).returncode == 0
+    pane_pid = int(pane.stdout.strip().split()[0])
+    try:
+        os.kill(pane_pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
 
 
 AUTH_URL_RE = re.compile(r"https?://\S*(auth|login|oauth|authorize)\S*", re.IGNORECASE)
