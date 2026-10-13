@@ -1,3 +1,0 @@
-python-dotenv>=1.0
-slack-bolt>=1.18
-hiemenz-utils @ git+https://github.com/Hiemenz/hiemenz-utils.git

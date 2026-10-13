@@ -167,10 +167,10 @@ tmux attach -t <repo-name> # attach directly (Ctrl-b d to detach again)
 
 ## Development
 
-Install dev dependencies (adds `pytest` on top of the runtime requirements):
+Install dependencies (runtime plus `pytest`) into `.venv`:
 
 ```
-.venv/bin/pip install -r requirements-dev.txt
+uv sync
 ```
 
 Run the tests:

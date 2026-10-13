@@ -210,8 +210,8 @@ claude-open/
 ├── claude-discord-bot.service  # systemd unit (Linux/Pi)
 ├── .env.example                # Config template
 ├── .env                        # Real config (gitignored)
-├── requirements.txt            # Runtime: discord.py, python-dotenv
-├── requirements-dev.txt        # + pytest
+├── pyproject.toml              # Dependencies (managed with uv)
+├── uv.lock                     # Locked versions
 ├── pytest.ini                  # Test config
 ├── tests/
 │   ├── conftest.py
