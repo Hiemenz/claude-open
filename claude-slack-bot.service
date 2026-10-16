@@ -8,6 +8,7 @@ Type=simple
 User=pi
 WorkingDirectory=/home/pi/git/claude-open
 ExecStart=/home/pi/git/claude-open/.venv/bin/python -u /home/pi/git/claude-open/slackbot.py
+KillMode=process
 Restart=on-failure
 RestartSec=5
 EnvironmentFile=/home/pi/git/claude-open/.env
