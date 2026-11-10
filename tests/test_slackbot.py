@@ -759,3 +759,57 @@ def test_handle_message_stop_is_for_programs_not_sessions(monkeypatch):
     with patch("slackbot.stop_program", return_value="Stopped *mlb*."):
         slackbot._handle_message_content("!stop mlb", slackbot.ALLOWED_CHANNEL_ID, say)
     assert say.call_args.kwargs["text"] == "Stopped *mlb*."
+
+
+TRUST_PANE_NO = (
+    "Is this a project you created or one you trust?\n"
+    " ❯ No, exit\n   Yes, I trust this folder\n Enter to confirm · Esc to cancel\n"
+)
+TRUST_PANE_YES = (
+    "Is this a project you created or one you trust?\n"
+    "   No, exit\n ❯ Yes, I trust this folder\n Enter to confirm · Esc to cancel\n"
+)
+
+
+def _run_trust_sequence(panes):
+    from unittest.mock import MagicMock
+    import slackbot
+
+    sent = []
+    pane_iter = iter(panes)
+
+    def fake_run(cmd, *args, **kwargs):
+        if "capture-pane" in cmd:
+            return MagicMock(stdout=next(pane_iter))
+        if "send-keys" in cmd:
+            sent.append(cmd[-1])
+        return MagicMock(stdout="")
+
+    with patch("slackbot.subprocess.run", side_effect=fake_run), \
+         patch("slackbot.time.sleep"):
+        url = slackbot._extract_session_url("s", timeout=5)
+    return url, sent
+
+
+def test_trust_prompt_never_confirms_while_no_selected():
+    # Down was dropped once (pane still shows "No"), so the bot must retry Down, not Enter.
+    url, sent = _run_trust_sequence([
+        TRUST_PANE_NO,
+        TRUST_PANE_NO,
+        TRUST_PANE_YES,
+        "https://claude.ai/code/session_abc123",
+    ])
+    assert url == "https://claude.ai/code/session_abc123"
+    assert sent == ["Down", "Down", "Enter"]
+
+
+def test_trust_prompt_waits_for_menu_ready():
+    partial = "Is this a project you created or one you trust?\n"
+    url, sent = _run_trust_sequence([
+        partial,
+        TRUST_PANE_NO,
+        TRUST_PANE_YES,
+        "https://claude.ai/code/session_xyz",
+    ])
+    assert url == "https://claude.ai/code/session_xyz"
+    assert sent == ["Down", "Enter"]

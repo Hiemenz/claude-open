@@ -333,9 +333,18 @@ def _fetch_url_via_rc(session_name: str, timeout: float = 4.0) -> str | None:
     return None
 
 
+TRUST_YES_SELECTED_RE = re.compile(r"❯\s*(\d\.\s*)?Yes, I trust this folder")
+TRUST_MENU_READY = "Enter to confirm"
+
+
 def _extract_session_url(session_name: str, timeout: float = 15.0) -> str | None:
+    """Wait for the remote-control URL, accepting the folder-trust prompt if shown.
+
+    The trust menu defaults to "No, exit". Keys sent before the menu is ready
+    get dropped, so a blind Down+Enter can land Enter on "No, exit" and kill
+    the session. Only press Enter once "Yes" is visibly selected.
+    """
     deadline = time.monotonic() + timeout
-    trust_handled = False
     while time.monotonic() < deadline:
         result = subprocess.run(
             [TMUX_BIN, "capture-pane", "-t", session_name, "-p"],
@@ -346,11 +355,11 @@ def _extract_session_url(session_name: str, timeout: float = 15.0) -> str | None
         match = SESSION_URL_RE.search(pane)
         if match:
             return match.group(0)
-        if not trust_handled and TRUST_PROMPT in pane:
-            subprocess.run([TMUX_BIN, "send-keys", "-t", session_name, "Down"])
-            time.sleep(0.1)
-            subprocess.run([TMUX_BIN, "send-keys", "-t", session_name, "Enter"])
-            trust_handled = True
+        if TRUST_PROMPT in pane and TRUST_MENU_READY in pane:
+            if TRUST_YES_SELECTED_RE.search(pane):
+                subprocess.run([TMUX_BIN, "send-keys", "-t", session_name, "Enter"])
+            else:
+                subprocess.run([TMUX_BIN, "send-keys", "-t", session_name, "Down"])
         time.sleep(0.5)
     return None
 
